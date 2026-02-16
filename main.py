@@ -10,6 +10,7 @@ import google.generativeai as genai
 from flask import Flask
 from threading import Thread
 import traceback
+import re
 
 # Load environment variables
 load_dotenv()
@@ -78,15 +79,30 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # --- WEB SEARCH HELPER ---
 async def search_web(query):
-    """Searches the web using DuckDuckGo"""
+    """Searches the web using DuckDuckGo with stealth and error handling"""
     try:
+        # Use DDGS with a timeout and handle potential blocking
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=3))
+            # We use a thread to keep it from blocking the event loop
+            results = await asyncio.to_thread(lambda: list(ddgs.text(query, max_results=3)))
+            
             if results:
-                search_text = "\n".join([f"- {r['title']}: {r['body']}" for r in results])
+                search_text = ""
+                for r in results:
+                    title = r.get('title', 'No Title')
+                    body = r.get('body', 'No Content')
+                    # Basic HTML tag removal just in case
+                    body = re.sub('<[^<]+?>', '', body)
+                    search_text += f"- {title}: {body}\n"
+                
+                # Check if we accidentally got HTML (Cloudflare block)
+                if "<html" in search_text.lower() or "<script" in search_text.lower():
+                    print("Search blocked by Cloudflare/Bot detection. Skipping web context.")
+                    return ""
+                    
                 return f"\n\nLATEST WEB SEARCH RESULTS:\n{search_text}"
     except Exception as e:
-        print(f"Search error: {e}")
+        print(f"Search error (likely blocked): {e}")
     return ""
 
 # --- AI INTEGRATIONS ---
@@ -98,13 +114,12 @@ async def get_gemini_response(prompt, search_context):
     
     try:
         full_prompt = f"{AI_SYSTEM_PROMPT}\n\nCONTEXT FROM WEB:\n{search_context}\n\nUser: {prompt}"
-        # Use asyncio.to_thread for the blocking Gemini call
         response = await asyncio.to_thread(gemini_model.generate_content, full_prompt)
         
         if response and response.text:
             return response.text
         else:
-            return "Gemini returned an empty response. It might be a safety filter block."
+            return "Gemini returned an empty response. This might be due to a safety filter."
     except Exception as e:
         error_msg = str(e)
         print(f"CRITICAL Gemini Error: {error_msg}")
@@ -112,7 +127,7 @@ async def get_gemini_response(prompt, search_context):
             return "❌ Your Google API Key is invalid. Please check it in Render settings."
         elif "User location is not supported" in error_msg:
             return "❌ Gemini is not available in the region where this bot is hosted (Render)."
-        return f"Gemini is having a moment: {error_msg[:100]}..."
+        return f"Gemini is having a moment. I'll try to answer from my internal knowledge if possible."
 
 async def get_grok_response(prompt, search_context):
     """Connects to xAI Grok API"""
@@ -160,10 +175,7 @@ async def get_ai_response(prompt):
 
     if settings["provider"] == "grok":
         return await get_grok_response(prompt, search_context)
-    elif settings["provider"] == "gemini":
-        return await get_gemini_response(prompt, search_context)
     else:
-        # Fallback to Gemini if Ollama is requested but we are in the cloud
         return await get_gemini_response(prompt, search_context)
 
 # --- COMMANDS ---
@@ -215,7 +227,7 @@ async def on_message(message):
             except Exception as e:
                 print(f"Error processing message: {e}")
                 traceback.print_exc()
-                await message.reply("Oops, I ran into an error processing that. Check my logs!")
+                await message.reply("Oops, I ran into an error. Check my logs!")
     else:
         await bot.process_commands(message)
 
@@ -226,14 +238,12 @@ def main():
     
     token = os.getenv('DISCORD_BOT_TOKEN')
     if not token:
-        print("CRITICAL ERROR: DISCORD_BOT_TOKEN not found in environment variables.")
+        print("CRITICAL ERROR: DISCORD_BOT_TOKEN not found.")
         return
         
     try:
         print("Attempting to connect to Discord...")
         bot.run(token)
-    except discord.errors.LoginFailure:
-        print("CRITICAL ERROR: Improper Discord token. Please check DISCORD_BOT_TOKEN in Render.")
     except Exception as e:
         print(f"CRITICAL ERROR during bot startup: {e}")
         traceback.print_exc()
