@@ -220,6 +220,26 @@ async def bot_status(ctx):
     premium = "✅ Active" if has_premium(ctx.author.id) else "❌ Inactive"
     await ctx.send(f"**PolyMind System Report**\n🧠 Brain: **{settings['provider'].upper()}**\n💎 Your Premium: {premium}\n🛡️ Rate Limit: {settings['rate_limit_premium'] if has_premium(ctx.author.id) else settings['rate_limit_free']} msg/min")
 
+# --- SLASH COMMANDS (for App Directory requirement) ---
+@bot.tree.command(name="ask", description="Ask PolyMind anything. Get an AI-powered answer.")
+@discord.app_commands.describe(question="Your question or message for PolyMind")
+async def ask_slash(interaction: discord.Interaction, question: str):
+    await interaction.response.defer(thinking=True)
+    
+    if is_rate_limited(interaction.user.id):
+        limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
+        await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
+        return
+    
+    try:
+        response = await get_ai_response(question, interaction.user.id)
+        chunks = split_message(response)
+        await interaction.followup.send(chunks[0])
+        for chunk in chunks[1:]:
+            await interaction.followup.send(chunk)
+    except Exception as e:
+        await interaction.followup.send("Oops, something went wrong. Try again!", ephemeral=True)
+
 # --- ENTITLEMENT EVENTS ---
 @bot.event
 async def on_entitlement_create(entitlement: discord.Entitlement):
@@ -247,6 +267,11 @@ async def on_entitlement_delete(entitlement: discord.Entitlement):
 @bot.event
 async def on_ready():
     print(f'✅ SUCCESS: PolyMind logged in as {bot.user}')
+    try:
+        synced = await bot.tree.sync()
+        print(f'✅ Slash commands synced: {len(synced)} command(s)')
+    except Exception as e:
+        print(f'❌ Failed to sync slash commands: {e}')
 
 @bot.event
 async def on_message(message):
