@@ -9,38 +9,69 @@
         body { background-color: #0f172a; color: white; }
         .feature-card { background-color: #1e293b; transition: transform 0.2s; }
         .feature-card:hover { transform: translateY(-5px); }
+        .hero-gradient {
+            background: radial-gradient(circle at center, rgba(59, 130, 246, 0.15) 0%, rgba(15, 23, 42, 0) 70%);
+        }
     </style>
 </head>
 <body class="font-sans">
-    <nav class="p-6 border-b border-slate-700 flex justify-between items-center">
-        <h1 class="text-2xl font-bold text-blue-400">PolyMind AI</h1>
-        <div class="space-x-6">
-            <a href="/privacy" class="hover:text-blue-400">Privacy Policy</a>
-            <a href="/tos" class="hover:text-blue-400">Terms of Service</a>
+    <nav class="p-6 border-b border-slate-700 flex justify-between items-center bg-slate-900/50 backdrop-blur-md sticky top-0 z-50">
+        <div class="flex items-center space-x-3">
+            <img src="{{ url_for('static', filename='logo.png') }}" alt="PolyMind Logo" class="w-10 h-10 rounded-lg shadow-lg shadow-blue-500/20">
+            <h1 class="text-2xl font-bold text-blue-400 tracking-tight">PolyMind AI</h1>
+        </div>
+        <div class="space-x-6 text-sm font-medium">
+            <a href="/privacy" class="text-slate-300 hover:text-blue-400 transition-colors">Privacy Policy</a>
+            <a href="/tos" class="text-slate-300 hover:text-blue-400 transition-colors">Terms of Service</a>
         </div>
     </nav>
 
-    <header class="py-20 text-center px-4">
-        <h2 class="text-5xl font-extrabold mb-4">The Smartest Friend in Your Server</h2>
-        <p class="text-xl text-slate-400 mb-8 max-w-2xl mx-auto">PolyMind is a dual-brain AI assistant powered by Gemini 3 and Grok, designed to bring professional-grade intelligence to your Discord community.</p>
-        <button class="bg-blue-600 hover:bg-blue-500 px-8 py-3 rounded-full font-bold text-lg">Add to Discord</button>
+    <header class="py-24 text-center px-4 hero-gradient relative overflow-hidden">
+        <div class="relative z-10">
+            <img src="{{ url_for('static', filename='logo.png') }}" alt="PolyMind AI" class="w-32 h-32 mx-auto mb-8 rounded-3xl shadow-2xl shadow-blue-500/40 border-2 border-blue-400/20">
+            <h2 class="text-5xl md:text-6xl font-extrabold mb-6 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-indigo-400">
+                The Smartest Friend in Your Server
+            </h2>
+            <p class="text-xl text-slate-400 mb-10 max-w-2xl mx-auto leading-relaxed">
+                PolyMind is a next-generation AI assistant powered by Gemini 3 and Grok. 
+                Bring professional-grade intelligence and live web insights to your Discord community.
+            </p>
+            <div class="flex flex-col sm:flex-row justify-center items-center space-y-4 sm:space-y-0 sm:space-x-4">
+                <button class="bg-blue-600 hover:bg-blue-500 px-10 py-4 rounded-full font-bold text-lg transition-all transform hover:scale-105 shadow-lg shadow-blue-600/25">
+                    Add to Discord
+                </button>
+                <a href="#features" class="text-slate-300 hover:text-white font-medium px-6 py-4">Explore Features ↓</a>
+            </div>
+        </div>
     </header>
 
-    <section class="max-w-6xl mx-auto px-4 py-12">
-        <h3 class="text-3xl font-bold mb-12 text-center">Live Features</h3>
+    <section id="features" class="max-w-6xl mx-auto px-4 py-20">
+        <div class="text-center mb-16">
+            <h3 class="text-3xl font-bold mb-4">Live Capabilities</h3>
+            <div class="h-1 w-20 bg-blue-500 mx-auto rounded-full"></div>
+        </div>
+        
         <div class="grid md:grid-cols-3 gap-8">
             {% for feature in features %}
-            <div class="feature-card p-8 rounded-2xl shadow-xl border border-slate-700">
-                <span class="text-xs font-bold uppercase tracking-widest text-blue-400">{{ feature.category }}</span>
-                <h4 class="text-xl font-bold mt-2 mb-4">{{ feature.name }}</h4>
-                <p class="text-slate-400 leading-relaxed">{{ feature.description }}</p>
+            <div class="feature-card p-8 rounded-2xl shadow-xl border border-slate-700/50 flex flex-col h-full">
+                <div class="mb-4">
+                    <span class="text-[10px] font-bold uppercase tracking-[0.2em] text-blue-400 bg-blue-400/10 px-3 py-1 rounded-full border border-blue-400/20">
+                        {{ feature.category }}
+                    </span>
+                </div>
+                <h4 class="text-xl font-bold mb-4 text-slate-100">{{ feature.name }}</h4>
+                <p class="text-slate-400 leading-relaxed text-sm flex-grow">{{ feature.description }}</p>
             </div>
             {% endfor %}
         </div>
     </section>
 
-    <footer class="py-12 border-t border-slate-700 text-center text-slate-500">
-        <p>&copy; {{ year }} PolyMind AI. All rights reserved.</p>
+    <footer class="py-16 border-t border-slate-800 text-center bg-slate-900/30">
+        <div class="flex items-center justify-center space-x-2 mb-6">
+            <img src="{{ url_for('static', filename='logo.png') }}" alt="PolyMind" class="w-6 h-6 rounded opacity-50">
+            <span class="text-slate-400 font-bold tracking-tight">PolyMind AI</span>
+        </div>
+        <p class="text-slate-500 text-sm">&copy; {{ year }} PolyMind AI. Built for the future of Discord.</p>
     </footer>
 </body>
 </html>
