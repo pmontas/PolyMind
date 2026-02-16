@@ -49,7 +49,8 @@ AI_SYSTEM_PROMPT = (
     "You're like a smart friend who knows a lot about everything. "
     "Talk naturally and casually, but be very helpful. "
     "Use your extensive internal knowledge to answer questions thoroughly. "
-    "Keep your responses engaging and informative."
+    "Keep your responses engaging and informative. "
+    "IMPORTANT: Keep your responses concise and under 1800 characters whenever possible."
 )
 
 # BANNED KEYWORDS (Safety layer)
@@ -69,6 +70,30 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
+
+# --- HELPER FUNCTIONS ---
+
+def split_message(text, limit=2000):
+    """Splits a string into chunks of a specific size"""
+    if len(text) <= limit:
+        return [text]
+    
+    chunks = []
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+        
+        # Try to find a good place to split (newline or space)
+        split_at = text.rfind('\n', 0, limit)
+        if split_at == -1:
+            split_at = text.rfind(' ', 0, limit)
+        if split_at == -1:
+            split_at = limit
+            
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip()
+    return chunks
 
 # --- AI INTEGRATIONS ---
 
@@ -184,7 +209,7 @@ async def get_ai_response(prompt):
 # --- COMMANDS ---
 
 @bot.command(name='assistant')
-@commands.has_permissions(administrator=True)
+@commands.is_owner() # Only YOU can change the brain
 async def set_assistant(ctx, provider: str, token: str = None):
     """Switch between providers."""
     provider = provider.lower()
@@ -205,6 +230,11 @@ async def set_assistant(ctx, provider: str, token: str = None):
             await ctx.send(f"✅ Switched to **Grok** (using default token).")
     else:
         await ctx.send(f"✅ Switched to **Gemini**.")
+
+@set_assistant.error
+async def assistant_error(ctx, error):
+    if isinstance(error, commands.NotOwner):
+        await ctx.send("❌ Only my creator can change my AI brain! 🛡️")
 
 @bot.command(name='status')
 async def bot_status(ctx):
@@ -249,7 +279,12 @@ async def on_message(message):
         async with message.channel.typing():
             try:
                 response = await get_ai_response(content)
-                await message.reply(response)
+                
+                # Split and send message if it's too long
+                chunks = split_message(response)
+                for chunk in chunks:
+                    await message.reply(chunk)
+                    
             except Exception as e:
                 error_msg = f"Oops, I crashed! Error: {str(e)[:100]}"
                 print(f"[ERROR] {error_msg}")
