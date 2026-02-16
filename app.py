@@ -33,9 +33,9 @@ print(f"XAI_API_KEY present: {bool(XAI_KEY)}")
 if GEMINI_KEY:
     try:
         genai.configure(api_key=GEMINI_KEY)
-        # Use gemini-pro which is the stable free model
-        gemini_model = genai.GenerativeModel('gemini-pro')
-        print("✅ Gemini AI configured successfully (using gemini-pro).")
+        # Use gemini-3-flash-preview (the current fast model in 2026)
+        gemini_model = genai.GenerativeModel('gemini-3-flash-preview')
+        print("✅ Gemini AI configured successfully (using gemini-3-flash-preview).")
     except Exception as e:
         print(f"❌ Error configuring Gemini: {e}")
         gemini_model = None
