@@ -87,9 +87,10 @@
                 <h4 class="text-2xl font-bold mb-2">Standard</h4>
                 <div class="text-4xl font-extrabold mb-6">$0<span class="text-lg text-slate-500 font-normal">/mo</span></div>
                 <ul class="space-y-4 mb-8 text-slate-300 text-sm">
-                    <li class="flex items-center">✅ Gemini 3 Intelligence</li>
                     <li class="flex items-center">✅ 5 messages per minute</li>
-                    <li class="flex items-center">✅ Smart message splitting</li>
+                    {% for feature in features if not feature.is_premium %}
+                    <li class="flex items-center">✅ {{ feature.name }}</li>
+                    {% endfor %}
                 </ul>
                 <button class="w-full py-3 rounded-xl border border-slate-600 font-bold hover:bg-slate-800 transition-colors">Current Plan</button>
             </div>
@@ -101,9 +102,9 @@
                 <div class="text-4xl font-extrabold mb-6">$8.99<span class="text-lg text-slate-500 font-normal">/mo</span></div>
                 <ul class="space-y-4 mb-8 text-slate-300 text-sm">
                     <li class="flex items-center">🚀 20 messages per minute</li>
-                    <li class="flex items-center">🧠 xAI Grok Premium Brain</li>
-                    <li class="flex items-center">⚡ Early access to new features</li>
-                    <li class="flex items-center">💎 Premium support</li>
+                    {% for feature in features if feature.is_premium %}
+                    <li class="flex items-center">🧠 {{ feature.name }}</li>
+                    {% endfor %}
                 </ul>
                 <button class="w-full py-3 rounded-xl bg-blue-600 font-bold hover:bg-blue-500 transition-all shadow-lg shadow-blue-600/20">Subscribe via Discord</button>
             </div>

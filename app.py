@@ -177,6 +177,16 @@ def has_premium(user_id):
     ent = db_session.query(UserEntitlement).filter(UserEntitlement.user_id == str(user_id)).first()
     return ent is not None
 
+
+def get_membership_display(user_id):
+    """Returns what membership the bot is detecting for this user (for status)."""
+    ent = db_session.query(UserEntitlement).filter(UserEntitlement.user_id == str(user_id)).first()
+    if not ent:
+        return "Free"
+    if ent.sku_id == str(PREMIUM_SKU_ID):
+        return "PolyMind Premium"
+    return f"Premium (SKU: {ent.sku_id})"
+
 def is_rate_limited(user_id):
     """Checks if a user has exceeded their minute limit"""
     now = time.time()
@@ -293,7 +303,15 @@ async def set_assistant(ctx, provider: str):
 @bot.command(name='status')
 async def bot_status(ctx):
     premium = "✅ Active" if has_premium(ctx.author.id) else "❌ Inactive"
-    await ctx.send(f"**PolyMind System Report**\n🧠 Brain: **{settings['provider'].upper()}**\n💎 Your Premium: {premium}\n🛡️ Rate Limit: {settings['rate_limit_premium'] if has_premium(ctx.author.id) else settings['rate_limit_free']} msg/min")
+    membership = get_membership_display(ctx.author.id)
+    limit = settings["rate_limit_premium"] if has_premium(ctx.author.id) else settings["rate_limit_free"]
+    await ctx.send(
+        f"**PolyMind System Report**\n"
+        f"🧠 Brain: **{settings['provider'].upper()}**\n"
+        f"💎 Your Premium: {premium}\n"
+        f"📋 Membership detected: **{membership}**\n"
+        f"🛡️ Rate Limit: {limit} msg/min"
+    )
 
 # --- SLASH COMMANDS (for App Directory requirement) ---
 @bot.tree.command(name="ask", description="Ask PolyMind anything. Get an AI-powered answer.")
@@ -355,6 +373,43 @@ async def ask_channel_slash(interaction: discord.Interaction, question: str, day
             await interaction.followup.send(chunk)
     except Exception:
         await interaction.followup.send("Something went wrong answering from channel history. Try again!", ephemeral=True)
+
+
+@bot.tree.command(name="help", description="See everything PolyMind can do.")
+async def help_slash(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="PolyMind – What I Can Do",
+        description="I'm an AI assistant powered by Gemini and Grok. Here's how to use me.",
+        color=discord.Color.blue(),
+    )
+    embed.add_field(
+        name="Slash commands",
+        value=(
+            "**`/ask`** *question* — Ask me anything. I'll reply with an AI answer.\n"
+            "**`/ask_channel`** *question* [*days_back*] — Ask about this channel's recent messages (e.g. *What did Carolyn say Friday?*). Use in a server channel.\n"
+            "**`/help`** — Show this message."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Other ways to talk to me",
+        value=(
+            "• **DM me** — Send any message and I'll reply.\n"
+            "• **@mention me** in a channel — Type `@PolyMind` and your question."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Prefix commands (optional)",
+        value=(
+            "**`!status`** — Your brain, premium status, and rate limit.\n"
+            "**`!assistant`** *gemini|grok* — (Owner only) Switch the default AI brain.\n"
+            "**`!addfeature`** — (Owner only) Add a feature to the website list."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Premium: higher limits + Grok brain • Subscribe via Discord or visit your server's bot link.")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # --- ENTITLEMENT EVENTS ---
