@@ -6,21 +6,66 @@ import asyncio
 from dotenv import load_dotenv
 import datetime
 import google.generativeai as genai
-from flask import Flask
+from flask import Flask, render_template, jsonify
 from threading import Thread
 import traceback
 import time
 from collections import defaultdict
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
 # Load environment variables
 load_dotenv()
 
-# --- WEB SERVER FOR RENDER/AZURE (KEEP-ALIVE) ---
+# --- DATABASE SETUP ---
+Base = declarative_base()
+
+class BotFeature(Base):
+    __tablename__ = 'bot_features'
+    id = Column(Integer, primary_key=True)
+    name = Column(String, unique=True)
+    description = Column(String)
+    is_active = Column(Boolean, default=True)
+    category = Column(String) # e.g., "AI", "Utility", "Safety"
+
+# Create database engine (SQLite is perfect for Azure App Service)
+engine = create_engine('sqlite:///polymind.db', connect_args={'check_same_thread': False})
+Base.metadata.create_all(engine)
+Session = sessionmaker(bind=engine)
+db_session = Session()
+
+# Initialize default features if database is empty
+def init_db():
+    if db_session.query(BotFeature).count() == 0:
+        features = [
+            BotFeature(name="Dual-Brain AI", description="Switch between Gemini 3 Flash and xAI Grok on the fly.", category="AI"),
+            BotFeature(name="Live Web Access", description="Real-time information retrieval for news and current events.", category="AI"),
+            BotFeature(name="Smart Message Splitting", description="Automatically handles long AI responses without crashing.", category="Utility"),
+            BotFeature(name="User Rate Limiting", description="Protects the bot from spam with configurable per-user limits.", category="Safety"),
+            BotFeature(name="Owner-Only Controls", description="Secure management commands locked to the bot creator.", category="Safety")
+        ]
+        db_session.add_all(features)
+        db_session.commit()
+        print("✅ Database initialized with default features.")
+
+init_db()
+
+# --- WEB SERVER (FLASK) ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "PolyMind AI Bot is alive and running!"
+    features = db_session.query(BotFeature).filter(BotFeature.is_active == True).all()
+    return render_template('index.html', features=features, year=datetime.datetime.now().year)
+
+@app.route('/privacy')
+def privacy():
+    return render_template('privacy.html')
+
+@app.route('/tos')
+def tos():
+    return render_template('tos.html')
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
@@ -54,13 +99,12 @@ else:
 settings = {
     "provider": "gemini",
     "xai_token": XAI_KEY,
-    "rate_limit_per_min": 5,      # Messages per user per minute
-    "max_chars_response": 1800,   # Target response length
+    "rate_limit_per_min": 5,
+    "max_chars_response": 1800,
     "cooldown_msg": "Slow down! You've reached your limit of {limit} messages per minute. Try again in a bit! ⏳"
 }
 
 # --- RATE LIMIT TRACKER ---
-# Format: {user_id: [timestamp1, timestamp2, ...]}
 user_usage = defaultdict(list)
 
 # AI SYSTEM PROMPT
@@ -73,125 +117,83 @@ AI_SYSTEM_PROMPT = (
     f"IMPORTANT: Keep your responses concise and under {settings['max_chars_response']} characters whenever possible."
 )
 
-# BANNED KEYWORDS (Safety layer)
-BANNED_KEYWORDS = [
-    "rm -rf", "format c:", "del /s /q c:", "shutdown /s", "system32"
-]
+# BANNED KEYWORDS
+BANNED_KEYWORDS = ["rm -rf", "format c:", "del /s /q c:", "shutdown /s", "system32"]
 
 # --- BOT SETUP ---
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # --- HELPER FUNCTIONS ---
-
 def split_message(text, limit=2000):
-    """Splits a string into chunks of a specific size"""
-    if len(text) <= limit:
-        return [text]
+    if len(text) <= limit: return [text]
     chunks = []
     while text:
         if len(text) <= limit:
-            chunks.append(text)
-            break
+            chunks.append(text); break
         split_at = text.rfind('\n', 0, limit)
-        if split_at == -1:
-            split_at = text.rfind(' ', 0, limit)
-        if split_at == -1:
-            split_at = limit
+        if split_at == -1: split_at = text.rfind(' ', 0, limit)
+        if split_at == -1: split_at = limit
         chunks.append(text[:split_at])
         text = text[split_at:].lstrip()
     return chunks
 
 def is_rate_limited(user_id):
-    """Checks if a user has exceeded their minute limit"""
     now = time.time()
-    # Remove timestamps older than 60 seconds
     user_usage[user_id] = [t for t in user_usage[user_id] if now - t < 60]
-    
-    if len(user_usage[user_id]) >= settings["rate_limit_per_min"]:
-        return True
-    
-    # Record this usage
+    if len(user_usage[user_id]) >= settings["rate_limit_per_min"]: return True
     user_usage[user_id].append(now)
     return False
 
 # --- AI INTEGRATIONS ---
-
 async def get_gemini_response(prompt):
-    """Connects to Google Gemini API"""
-    if not gemini_model:
-        return "❌ Gemini is not configured correctly."
+    if not gemini_model: return "❌ Gemini is not configured."
     try:
         response = await asyncio.to_thread(gemini_model.generate_content, f"{AI_SYSTEM_PROMPT}\n\nUser: {prompt}")
-        return response.text if response and response.text else "⚠️ Gemini returned an empty response."
+        return response.text if response and response.text else "⚠️ Gemini returned empty."
     except Exception as e:
-        print(f"[GEMINI] Error: {e}")
-        return "❌ Gemini is having a moment. Try again shortly."
+        return f"❌ Gemini error: {str(e)[:100]}"
 
 async def get_grok_response(prompt):
-    """Connects to xAI Grok API"""
     headers = {"Authorization": f"Bearer {settings['xai_token']}", "Content-Type": "application/json"}
-    payload = {
-        "model": "grok-beta",
-        "messages": [{"role": "system", "content": AI_SYSTEM_PROMPT}, {"role": "user", "content": prompt}],
-        "stream": False
-    }
+    payload = {"model": "grok-beta", "messages": [{"role": "system", "content": AI_SYSTEM_PROMPT}, {"role": "user", "content": prompt}], "stream": False}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(XAI_API_URL, json=payload, headers=headers, timeout=30) as response:
                 if response.status == 200:
                     data = await response.json()
                     return data['choices'][0]['message']['content']
-                return f"❌ Grok error (Status {response.status})."
-    except Exception as e:
-        print(f"[GROK] Error: {e}")
-        return "❌ Can't reach Grok servers right now."
+                return f"❌ Grok error {response.status}."
+    except Exception: return "❌ Grok unreachable."
 
 async def get_ai_response(prompt):
-    """Main AI router"""
     clean_prompt = prompt.lower()
-    for keyword in BANNED_KEYWORDS:
-        if keyword in clean_prompt:
-            return "Whoa, chill out with those commands. I'm just here to chat, not break things. 😅"
-    
-    if settings["provider"] == "grok":
-        return await get_grok_response(prompt)
+    for kw in BANNED_KEYWORDS:
+        if kw in clean_prompt: return "Whoa, chill out! 😅"
+    if settings["provider"] == "grok": return await get_grok_response(prompt)
     return await get_gemini_response(prompt)
 
 # --- COMMANDS ---
+@bot.command(name='addfeature')
+@commands.is_owner()
+async def add_feature(ctx, name: str, category: str, *, description: str):
+    """Add a new feature to the website. Usage: !addfeature "Name" "Category" Description"""
+    new_feat = BotFeature(name=name, category=category, description=description)
+    db_session.add(new_feat)
+    db_session.commit()
+    await ctx.send(f"✅ Feature **{name}** added! It will now show on the website.")
 
 @bot.command(name='assistant')
 @commands.is_owner()
-async def set_assistant(ctx, provider: str, token: str = None):
-    """Switch providers. Usage: !assistant grok [token] or !assistant gemini"""
-    provider = provider.lower()
-    if provider not in ["grok", "gemini"]:
-        await ctx.send("❌ Use `grok` or `gemini`.")
-        return
-    settings["provider"] = provider
-    if provider == "grok" and token:
-        settings["xai_token"] = token
-    await ctx.send(f"✅ Switched brain to **{provider.capitalize()}**.")
-
-@bot.command(name='limit')
-@commands.is_owner()
-async def set_limit(ctx, new_limit: int):
-    """Set the rate limit per minute. Usage: !limit 10"""
-    settings["rate_limit_per_min"] = new_limit
-    await ctx.send(f"✅ Rate limit updated to **{new_limit}** messages per minute.")
+async def set_assistant(ctx, provider: str):
+    settings["provider"] = provider.lower()
+    await ctx.send(f"✅ Brain: **{provider.capitalize()}**")
 
 @bot.command(name='status')
 async def bot_status(ctx):
-    """Bot health report"""
-    await ctx.send(
-        f"**PolyMind System Report**\n"
-        f"🧠 Active Brain: **{settings['provider'].upper()}**\n"
-        f"🛡️ Rate Limit: **{settings['rate_limit_per_min']} msg/min**\n"
-        f"⚡ Status: **Online & Healthy**"
-    )
+    await ctx.send(f"**PolyMind System Report**\n🧠 Brain: **{settings['provider'].upper()}**\n🛡️ Rate Limit: **{settings['rate_limit_per_min']} msg/min**")
 
 # --- EVENTS ---
 @bot.event
@@ -200,44 +202,29 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    if message.author == bot.user:
-        return
-
+    if message.author == bot.user: return
     is_dm = isinstance(message.channel, discord.DMChannel)
-    is_mention = bot.user.mentioned_in(message)
-
-    if is_dm or is_mention:
+    if is_dm or bot.user.mentioned_in(message):
         content = message.content.replace(f'<@!{bot.user.id}>', '').replace(f'<@{bot.user.id}>', '').strip()
-        
         if content.startswith('!'):
             await bot.process_commands(message)
             return
-
-        if not content and not is_dm:
-            return
-
-        # --- RATE LIMIT CHECK ---
+        if not content and not is_dm: return
         if is_rate_limited(message.author.id):
             await message.reply(settings["cooldown_msg"].format(limit=settings["rate_limit_per_min"]))
             return
-
         async with message.channel.typing():
             try:
                 response = await get_ai_response(content)
-                chunks = split_message(response)
-                for chunk in chunks:
-                    await message.reply(chunk)
-            except Exception as e:
-                print(f"[ERROR] {e}")
-                await message.reply("Oops, I ran into an error. Please try again!")
+                for chunk in split_message(response): await message.reply(chunk)
+            except Exception: await message.reply("Oops, error!")
     else:
         await bot.process_commands(message)
 
 # --- START BOT ---
 def run_bot():
     token = os.getenv('DISCORD_BOT_TOKEN')
-    if token:
-        bot.run(token)
+    if token: bot.run(token)
 
 bot_thread = Thread(target=run_bot, daemon=True)
 bot_thread.start()
