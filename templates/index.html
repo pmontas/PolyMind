@@ -12,6 +12,9 @@
         .hero-gradient {
             background: radial-gradient(circle at center, rgba(59, 130, 246, 0.15) 0%, rgba(15, 23, 42, 0) 70%);
         }
+        .premium-badge {
+            background: linear-gradient(to right, #f59e0b, #d97706);
+        }
     </style>
 </head>
 <body class="font-sans">
@@ -21,6 +24,7 @@
             <h1 class="text-2xl font-bold text-blue-400 tracking-tight">PolyMind AI</h1>
         </div>
         <div class="space-x-6 text-sm font-medium">
+            <a href="#pricing" class="text-slate-300 hover:text-blue-400 transition-colors">Pricing</a>
             <a href="/privacy" class="text-slate-300 hover:text-blue-400 transition-colors">Privacy Policy</a>
             <a href="/tos" class="text-slate-300 hover:text-blue-400 transition-colors">Terms of Service</a>
         </div>
@@ -53,7 +57,12 @@
         
         <div class="grid md:grid-cols-3 gap-8">
             {% for feature in features %}
-            <div class="feature-card p-8 rounded-2xl shadow-xl border border-slate-700/50 flex flex-col h-full">
+            <div class="feature-card p-8 rounded-2xl shadow-xl border border-slate-700/50 flex flex-col h-full relative">
+                {% if feature.is_premium %}
+                <div class="absolute top-4 right-4 premium-badge px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider text-white shadow-lg">
+                    Premium
+                </div>
+                {% endif %}
                 <div class="mb-4">
                     <span class="text-[10px] font-bold uppercase tracking-[0.2em] text-blue-400 bg-blue-400/10 px-3 py-1 rounded-full border border-blue-400/20">
                         {{ feature.category }}
@@ -64,6 +73,42 @@
             </div>
             {% endfor %}
         </div>
+    </section>
+
+    <section id="pricing" class="max-w-4xl mx-auto px-4 py-20">
+        <div class="text-center mb-16">
+            <h3 class="text-3xl font-bold mb-4">Simple Pricing</h3>
+            <p class="text-slate-400">Unlock the full power of PolyMind directly through Discord.</p>
+        </div>
+        
+        <div class="grid md:grid-cols-2 gap-8">
+            <!-- Free Tier -->
+            <div class="p-8 rounded-2xl border border-slate-700 bg-slate-900/50">
+                <h4 class="text-2xl font-bold mb-2">Standard</h4>
+                <div class="text-4xl font-extrabold mb-6">$0<span class="text-lg text-slate-500 font-normal">/mo</span></div>
+                <ul class="space-y-4 mb-8 text-slate-300 text-sm">
+                    <li class="flex items-center">✅ Gemini 3 Intelligence</li>
+                    <li class="flex items-center">✅ 5 messages per minute</li>
+                    <li class="flex items-center">✅ Smart message splitting</li>
+                </ul>
+                <button class="w-full py-3 rounded-xl border border-slate-600 font-bold hover:bg-slate-800 transition-colors">Current Plan</button>
+            </div>
+            
+            <!-- Premium Tier -->
+            <div class="p-8 rounded-2xl border-2 border-blue-500 bg-slate-900 shadow-2xl shadow-blue-500/10 relative">
+                <div class="absolute -top-4 left-1/2 -translate-x-1/2 premium-badge px-4 py-1 rounded-full text-xs font-bold uppercase tracking-widest">Most Popular</div>
+                <h4 class="text-2xl font-bold mb-2">Premium</h4>
+                <div class="text-4xl font-extrabold mb-6">$4.99<span class="text-lg text-slate-500 font-normal">/mo</span></div>
+                <ul class="space-y-4 mb-8 text-slate-300 text-sm">
+                    <li class="flex items-center">🚀 20 messages per minute</li>
+                    <li class="flex items-center">🧠 xAI Grok Premium Brain</li>
+                    <li class="flex items-center">⚡ Early access to new features</li>
+                    <li class="flex items-center">💎 Premium support</li>
+                </ul>
+                <button class="w-full py-3 rounded-xl bg-blue-600 font-bold hover:bg-blue-500 transition-all shadow-lg shadow-blue-600/20">Subscribe via Discord</button>
+            </div>
+        </div>
+        <p class="text-center mt-12 text-sm text-slate-500">Subscriptions are handled securely by Discord. Manage your subscription in your Discord User Settings.</p>
     </section>
 
     <footer class="py-16 border-t border-slate-800 text-center bg-slate-900/30">
