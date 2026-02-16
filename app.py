@@ -14,21 +14,11 @@ import traceback
 load_dotenv()
 
 # --- WEB SERVER FOR RENDER (KEEP-ALIVE) ---
-app = Flask('')
+app = Flask(__name__)
 
 @app.route('/')
 def home():
     return "PolyMind AI Bot is alive and running!"
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    print(f"Starting web server on port {port}...")
-    app.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    t = Thread(target=run_web_server)
-    t.daemon = True
-    t.start()
 
 # --- CONFIGURATION ---
 XAI_API_URL = "https://api.x.ai/v1/chat/completions"
@@ -77,10 +67,9 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 async def get_gemini_response(prompt):
     """Connects to Google Gemini API (Free Tier)"""
     if not GEMINI_KEY:
-        return "❌ Gemini API Key is missing in Render environment variables!"
+        return "❌ Gemini API Key is missing in environment variables!"
     
     try:
-        # Gemini 1.5 Flash has a massive knowledge base and can handle complex queries
         response = await asyncio.to_thread(gemini_model.generate_content, f"{AI_SYSTEM_PROMPT}\n\nUser: {prompt}")
         
         if response and response.text:
@@ -91,9 +80,9 @@ async def get_gemini_response(prompt):
         error_msg = str(e)
         print(f"CRITICAL Gemini Error: {error_msg}")
         if "API_KEY_INVALID" in error_msg:
-            return "❌ Your Google API Key is invalid. Please check it in Render settings."
+            return "❌ Your Google API Key is invalid. Please check it in Azure settings."
         elif "User location is not supported" in error_msg:
-            return "❌ Gemini is not available in the region where this bot is hosted (Render)."
+            return "❌ Gemini is not available in the region where this bot is hosted."
         return f"Gemini is having a moment. Please try again in a few seconds."
 
 async def get_grok_response(prompt):
@@ -189,11 +178,9 @@ async def on_message(message):
     else:
         await bot.process_commands(message)
 
-# --- START BOT ---
-def main():
-    # Start the keep-alive web server
-    keep_alive()
-    
+# --- START BOT IN BACKGROUND ---
+def run_bot():
+    """Start the Discord bot in a separate thread"""
     token = os.getenv('DISCORD_BOT_TOKEN')
     if not token:
         print("CRITICAL ERROR: DISCORD_BOT_TOKEN not found.")
@@ -206,5 +193,13 @@ def main():
         print(f"CRITICAL ERROR during bot startup: {e}")
         traceback.print_exc()
 
+# Start the bot automatically when gunicorn loads this file
+bot_thread = Thread(target=run_bot, daemon=True)
+bot_thread.start()
+print("Discord bot thread started in background.")
+
+# This is only for local development (won't run on gunicorn/Azure)
 if __name__ == "__main__":
-    main()
+    # For local testing, also start the Flask server
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
