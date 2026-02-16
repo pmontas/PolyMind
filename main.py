@@ -6,10 +6,10 @@ import asyncio
 from dotenv import load_dotenv
 from duckduckgo_search import DDGS
 import datetime
-import json
 import google.generativeai as genai
 from flask import Flask
 from threading import Thread
+import traceback
 
 # Load environment variables
 load_dotenv()
@@ -19,15 +19,16 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "AI Bot is alive and running!"
+    return "PolyMind AI Bot is alive and running!"
 
 def run_web_server():
-    # Render provides a PORT environment variable
     port = int(os.environ.get("PORT", 8080))
+    print(f"Starting web server on port {port}...")
     app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
     t = Thread(target=run_web_server)
+    t.daemon = True
     t.start()
 
 # --- CONFIGURATION ---
@@ -36,12 +37,20 @@ OLLAMA_MODEL = "llama3.2:latest"
 XAI_API_URL = "https://api.x.ai/v1/chat/completions"
 
 # Configure Gemini
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+GEMINI_KEY = os.getenv("GOOGLE_API_KEY")
+if GEMINI_KEY:
+    try:
+        genai.configure(api_key=GEMINI_KEY)
+        gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+        print("Gemini AI configured successfully.")
+    except Exception as e:
+        print(f"Error configuring Gemini: {e}")
+else:
+    print("WARNING: GOOGLE_API_KEY not found in environment variables.")
 
 # AI SYSTEM PROMPT
 AI_SYSTEM_PROMPT = (
-    "You are a cool, knowledgeable assistant with live web access. "
+    "You are PolyMind, a cool, knowledgeable assistant with live web access. "
     "You're like a smart friend who knows a lot about everything. "
     "Talk naturally and casually, but be very helpful. "
     "When the user asks for news or latest info, use the search results provided to answer. "
@@ -56,7 +65,7 @@ BANNED_KEYWORDS = [
 
 # --- STATE MANAGEMENT ---
 settings = {
-    "provider": "gemini", # Default to free cloud AI for hosting
+    "provider": "gemini", 
     "xai_token": os.getenv("XAI_API_KEY", "xai-XgUOgSxJIyOJhJY5njHg7k7X4YXk9MxLxF9hOw2NrNFomvDBvv8VF76WaJDlnTDDkp6Z7B83nj6CS8Yj")
 }
 
@@ -84,13 +93,26 @@ async def search_web(query):
 
 async def get_gemini_response(prompt, search_context):
     """Connects to Google Gemini API (Free Tier)"""
+    if not GEMINI_KEY:
+        return "❌ Gemini API Key is missing in Render environment variables!"
+    
     try:
         full_prompt = f"{AI_SYSTEM_PROMPT}\n\nCONTEXT FROM WEB:\n{search_context}\n\nUser: {prompt}"
+        # Use asyncio.to_thread for the blocking Gemini call
         response = await asyncio.to_thread(gemini_model.generate_content, full_prompt)
-        return response.text
+        
+        if response and response.text:
+            return response.text
+        else:
+            return "Gemini returned an empty response. It might be a safety filter block."
     except Exception as e:
-        print(f"Gemini error: {e}")
-        return "My Gemini brain is having a moment. Try again! 🧠💨"
+        error_msg = str(e)
+        print(f"CRITICAL Gemini Error: {error_msg}")
+        if "API_KEY_INVALID" in error_msg:
+            return "❌ Your Google API Key is invalid. Please check it in Render settings."
+        elif "User location is not supported" in error_msg:
+            return "❌ Gemini is not available in the region where this bot is hosted (Render)."
+        return f"Gemini is having a moment: {error_msg[:100]}..."
 
 async def get_grok_response(prompt, search_context):
     """Connects to xAI Grok API"""
@@ -113,30 +135,10 @@ async def get_grok_response(prompt, search_context):
                     data = await response.json()
                     return data['choices'][0]['message']['content']
                 else:
-                    return f"Grok is acting up (Error {response.status})."
+                    return f"Grok error (Status {response.status})."
     except Exception as e:
         print(f"Grok error: {e}")
         return "I can't reach the Grok servers right now!"
-
-async def get_ollama_response(prompt, search_context):
-    """Connects to local Ollama"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            full_prompt = f"{AI_SYSTEM_PROMPT}{search_context}\n\nUser says: {prompt}\nYour response:"
-            payload = {
-                "model": OLLAMA_MODEL,
-                "prompt": full_prompt,
-                "stream": False
-            }
-            async with session.post(OLLAMA_API_URL, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data.get('response', "I'm thinking, but I can't find the words!")
-                else:
-                    return "My local brain is a bit foggy (Ollama error)."
-    except Exception as e:
-        print(f"Ollama error: {e}")
-        return "I can't connect to my local brain right now!"
 
 async def get_ai_response(prompt):
     """Main AI router"""
@@ -161,17 +163,18 @@ async def get_ai_response(prompt):
     elif settings["provider"] == "gemini":
         return await get_gemini_response(prompt, search_context)
     else:
-        return await get_ollama_response(prompt, search_context)
+        # Fallback to Gemini if Ollama is requested but we are in the cloud
+        return await get_gemini_response(prompt, search_context)
 
 # --- COMMANDS ---
 
 @bot.command(name='assistant')
 @commands.has_permissions(administrator=True)
 async def set_assistant(ctx, provider: str, token: str = None):
-    """Switch between ollama, grok, and gemini."""
+    """Switch between providers."""
     provider = provider.lower()
-    if provider not in ["ollama", "grok", "gemini"]:
-        await ctx.send("❌ Invalid provider. Use `ollama`, `grok`, or `gemini`.")
+    if provider not in ["grok", "gemini"]:
+        await ctx.send("❌ Invalid provider for cloud hosting. Use `grok` or `gemini`.")
         return
 
     settings["provider"] = provider
@@ -184,7 +187,8 @@ async def set_assistant(ctx, provider: str, token: str = None):
 # --- EVENTS ---
 @bot.event
 async def on_ready():
-    print(f'AI Chat Bot logged in as {bot.user}')
+    print(f'SUCCESS: PolyMind logged in as {bot.user}')
+    print("Bot is ready to receive messages.")
 
 @bot.event
 async def on_message(message):
@@ -205,8 +209,13 @@ async def on_message(message):
             return
 
         async with message.channel.typing():
-            response = await get_ai_response(content)
-            await message.reply(response)
+            try:
+                response = await get_ai_response(content)
+                await message.reply(response)
+            except Exception as e:
+                print(f"Error processing message: {e}")
+                traceback.print_exc()
+                await message.reply("Oops, I ran into an error processing that. Check my logs!")
     else:
         await bot.process_commands(message)
 
@@ -217,9 +226,17 @@ def main():
     
     token = os.getenv('DISCORD_BOT_TOKEN')
     if not token:
-        print("ERROR: DISCORD_BOT_TOKEN not found.")
+        print("CRITICAL ERROR: DISCORD_BOT_TOKEN not found in environment variables.")
         return
-    bot.run(token)
+        
+    try:
+        print("Attempting to connect to Discord...")
+        bot.run(token)
+    except discord.errors.LoginFailure:
+        print("CRITICAL ERROR: Improper Discord token. Please check DISCORD_BOT_TOKEN in Render.")
+    except Exception as e:
+        print(f"CRITICAL ERROR during bot startup: {e}")
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
