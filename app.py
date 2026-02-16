@@ -52,13 +52,30 @@ def init_db():
             BotFeature(name="High Speed Mode", description="Increased rate limits for faster, more frequent responses.", category="Utility", is_premium=True),
             BotFeature(name="Smart Message Splitting", description="Automatically handles long AI responses without crashing.", category="Utility", is_premium=False),
             BotFeature(name="User Rate Limiting", description="Protects the bot from spam with configurable per-user limits.", category="Safety", is_premium=False),
-            BotFeature(name="Owner-Only Controls", description="Secure management commands locked to the bot creator.", category="Safety", is_premium=False)
+            BotFeature(name="Owner-Only Controls", description="Secure management commands locked to the bot creator.", category="Safety", is_premium=False),
+            BotFeature(name="Channel Memory", description="Ask about this channel's recent messages (e.g. what did Carolyn say Friday?) with /ask_channel.", category="Utility", is_premium=False),
         ]
         db_session.add_all(features)
         db_session.commit()
         print("✅ Database initialized with default features.")
 
+
+def ensure_channel_memory_feature():
+    """Add Channel Memory feature if missing (e.g. after deploy so the website shows it)."""
+    if db_session.query(BotFeature).filter(BotFeature.name == "Channel Memory").first():
+        return
+    db_session.add(BotFeature(
+        name="Channel Memory",
+        description="Ask about this channel's recent messages (e.g. what did Carolyn say Friday?) with /ask_channel.",
+        category="Utility",
+        is_premium=False,
+    ))
+    db_session.commit()
+    print("✅ Added 'Channel Memory' feature to database.")
+
+
 init_db()
+ensure_channel_memory_feature()
 
 # --- WEB SERVER (FLASK) ---
 app = Flask(__name__)
@@ -130,6 +147,11 @@ AI_SYSTEM_PROMPT = (
 # BANNED KEYWORDS
 BANNED_KEYWORDS = ["rm -rf", "format c:", "del /s /q c:", "shutdown /s", "system32"]
 
+# Channel memory (ask about channel history)
+CHANNEL_MEMORY_MAX_DAYS = 14
+CHANNEL_MEMORY_MAX_MESSAGES = 200
+CHANNEL_MEMORY_MAX_CHARS = 4000
+
 # --- BOT SETUP ---
 intents = discord.Intents.default()
 intents.message_content = True
@@ -199,6 +221,59 @@ async def get_ai_response(prompt, user_id):
     if settings["provider"] == "grok": return await get_grok_response(prompt)
     return await get_gemini_response(prompt)
 
+# --- CHANNEL MEMORY (ask about channel history) ---
+async def fetch_channel_transcript(channel, days_back: int, max_chars: int = CHANNEL_MEMORY_MAX_CHARS):
+    """Fetch recent messages from a text channel and return a transcript string. Returns (transcript, error_msg)."""
+    if not isinstance(channel, discord.TextChannel):
+        return None, "This command only works in a server text channel."
+    after = datetime.datetime.utcnow() - datetime.timedelta(days=days_back)
+    try:
+        lines = []
+        async for msg in channel.history(limit=CHANNEL_MEMORY_MAX_MESSAGES, after=after, oldest_first=True):
+            if msg.author.bot:
+                continue
+            name = msg.author.display_name or msg.author.name
+            ts = msg.created_at.strftime("%Y-%m-%d %H:%M")
+            content = (msg.content or "").strip()
+            if not content:
+                continue
+            if len(content) > 300:
+                content = content[:297] + "..."
+            lines.append(f"{name} ({ts}): {content}")
+        transcript = "\n".join(lines)
+        if len(transcript) > max_chars:
+            transcript = transcript[-max_chars:].strip()
+            if "\n" in transcript:
+                transcript = "..." + transcript[transcript.index("\n") + 1:]
+        if not transcript.strip():
+            return None, "No messages found in this channel for that time range."
+        return transcript, None
+    except discord.Forbidden:
+        return None, "I don't have permission to read this channel's message history."
+    except Exception as e:
+        return None, f"Could not read channel history: {str(e)[:80]}"
+
+def _channel_memory_prompt(transcript: str, question: str) -> str:
+    return (
+        "The user is asking about messages in this Discord channel. "
+        "Below is a recent transcript (Author (date time): content). "
+        "Answer their question based ONLY on this transcript. If the answer isn't there, say so briefly.\n\n"
+        "--- Transcript ---\n" + transcript + "\n--- End ---\n\nUser question: " + question
+    )
+
+async def get_channel_aware_response(transcript: str, question: str, user_id):
+    """Answer a question using channel transcript as context. Banned check on question only; respects provider/premium."""
+    q_clean = question.lower()
+    for kw in BANNED_KEYWORDS:
+        if kw in q_clean:
+            return "Whoa, chill out! 😅"
+    if settings["provider"] == "grok" and not has_premium(user_id):
+        return "✨ **Grok is a Premium feature.** Upgrade to use channel memory with Grok! ✨"
+    prompt = _channel_memory_prompt(transcript, question)
+    if settings["provider"] == "grok":
+        return await get_grok_response(prompt)
+    return await get_gemini_response(prompt)
+
 # --- COMMANDS ---
 @bot.command(name='addfeature')
 @commands.is_owner()
@@ -239,6 +314,48 @@ async def ask_slash(interaction: discord.Interaction, question: str):
             await interaction.followup.send(chunk)
     except Exception as e:
         await interaction.followup.send("Oops, something went wrong. Try again!", ephemeral=True)
+
+
+@bot.tree.command(name="ask_channel", description="Ask about this channel's recent messages (e.g. what did Carolyn say Friday?).")
+@discord.app_commands.describe(
+    question="Your question about the channel (e.g. What did Carolyn say Friday?)",
+    days_back="How many days of history to look at (1–14, default 7)"
+)
+@discord.app_commands.choices(days_back=[
+    discord.app_commands.Choice(name="Last 1 day", value=1),
+    discord.app_commands.Choice(name="Last 3 days", value=3),
+    discord.app_commands.Choice(name="Last 7 days", value=7),
+    discord.app_commands.Choice(name="Last 14 days", value=14),
+])
+async def ask_channel_slash(interaction: discord.Interaction, question: str, days_back: int = 7):
+    await interaction.response.defer(thinking=True)
+
+    if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
+        await interaction.followup.send("Use this command in a server text channel so I can read recent messages.", ephemeral=True)
+        return
+
+    if is_rate_limited(interaction.user.id):
+        limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
+        await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
+        return
+
+    if days_back is None:
+        days_back = 7
+    days_back = max(1, min(CHANNEL_MEMORY_MAX_DAYS, days_back))
+    transcript, err = await fetch_channel_transcript(interaction.channel, days_back)
+    if err:
+        await interaction.followup.send(err, ephemeral=True)
+        return
+
+    try:
+        response = await get_channel_aware_response(transcript, question, interaction.user.id)
+        chunks = split_message(response)
+        await interaction.followup.send(chunks[0])
+        for chunk in chunks[1:]:
+            await interaction.followup.send(chunk)
+    except Exception:
+        await interaction.followup.send("Something went wrong answering from channel history. Try again!", ephemeral=True)
+
 
 # --- ENTITLEMENT EVENTS ---
 @bot.event
