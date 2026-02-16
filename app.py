@@ -157,6 +157,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
+bot.remove_command('help')  # use our custom !help instead of discord.py default
 
 # --- HELPER FUNCTIONS ---
 def split_message(text, limit=2000):
@@ -484,7 +485,15 @@ async def on_message(message):
 # --- START BOT ---
 def run_bot():
     token = os.getenv('DISCORD_BOT_TOKEN')
-    if token: bot.run(token)
+    if not token or not token.strip():
+        print('❌ DISCORD_BOT_TOKEN is not set. Bot will not connect. Set it in your environment (e.g. Azure Application settings).')
+        return
+    print('🔄 Starting Discord bot...')
+    try:
+        bot.run(token.strip())
+    except Exception as e:
+        print(f'❌ Bot failed to connect: {e}')
+        traceback.print_exc()
 
 bot_thread = Thread(target=run_bot, daemon=True)
 bot_thread.start()
