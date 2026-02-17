@@ -1,0 +1,28 @@
+# Environment and secrets
+.env
+*.env
+
+# Database
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+antenv/
+.venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Azure
+.deployment
