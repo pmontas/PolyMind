@@ -296,12 +296,16 @@ async def get_gemini_response(prompt: str) -> str:
         return "Something went wrong with the AI. Try again in a moment."
 
 
+# Current xAI chat model (grok-beta is deprecated). Use grok-3-mini, grok-3, or grok-4-1-fast-reasoning.
+XAI_MODEL = os.getenv("XAI_MODEL", "grok-3-mini")
+
+
 async def get_grok_response(prompt: str) -> str:
     if not XAI_KEY:
         return "Grok is not configured. Please contact the bot owner."
     headers = {"Authorization": f"Bearer {XAI_KEY}", "Content-Type": "application/json"}
     payload = {
-        "model": "grok-beta",
+        "model": XAI_MODEL,
         "messages": [
             {"role": "system", "content": AI_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
@@ -314,7 +318,8 @@ async def get_grok_response(prompt: str) -> str:
                 if response.status == 200:
                     data = await response.json()
                     return data['choices'][0]['message']['content']
-                log.error(f"Grok API error: {response.status}")
+                body = await response.text()
+                log.error(f"Grok API error: {response.status} - {body[:500]}")
                 return "Grok encountered an error. Try again in a moment."
     except asyncio.TimeoutError:
         return "Grok took too long to respond. Try again."
