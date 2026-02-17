@@ -425,6 +425,25 @@ async def set_assistant(ctx, provider: str):
     await ctx.send(f"Brain switched to **{provider.capitalize()}**.")
 
 
+@bot.command(name='addpremium')
+@commands.is_owner()
+async def add_test_premium(ctx, user_id: str):
+    """(Owner only) Grant test premium to a user. Usage: !addpremium <discord_user_id>"""
+    user_id = user_id.strip()
+    if not user_id.isdigit():
+        await ctx.send("Invalid user ID. Use a numeric Discord user ID (e.g. `!addpremium 249640288996294657`).")
+        return
+    sku_id = str(PREMIUM_SKU_ID) if PREMIUM_SKU_ID else "test_premium"
+    try:
+        db_session.query(UserEntitlement).filter(UserEntitlement.user_id == user_id).delete()
+        db_session.add(UserEntitlement(user_id=user_id, sku_id=sku_id, ends_at=None))
+        db_session.commit()
+        await ctx.send(f"Premium granted for user ID **{user_id}** (sku: {sku_id}). They can use !status to verify.")
+    except Exception as e:
+        log.error(f"add_test_premium failed: {e}")
+        await ctx.send("Failed to update database. Check logs.")
+
+
 @bot.command(name='status')
 async def bot_status(ctx):
     """Show bot status, premium, and rate limit info."""
@@ -535,7 +554,8 @@ async def help_slash(interaction: discord.Interaction):
         value=(
             "**`!status`** - Your brain, premium status, and rate limit.\n"
             "**`!assistant`** *gemini|grok* - (Owner only) Switch AI brain.\n"
-            "**`!addfeature`** - (Owner only) Add a feature to the website."
+            "**`!addfeature`** - (Owner only) Add a feature to the website.\n"
+            "**`!addpremium <user_id>`** - (Owner only) Grant test premium to a user (for Azure/testing)."
         ),
         inline=False,
     )
