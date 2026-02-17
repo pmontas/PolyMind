@@ -130,6 +130,7 @@ def ensure_new_features():
         ("Summaries & Digest", "Summarize a thread with /summarize_thread or channel topics with /channel_digest.", "Utility"),
         ("Moderation & Support", "Mods can right-click a message and Check message for toxicity. Support channels get AI reply suggestions.", "Safety"),
         ("RSS Digest", "Optional scheduled or on-demand AI summaries of RSS feeds posted to a channel.", "Integration"),
+        ("Link Reader", "Share any URL in chat and I'll read and summarize its content using Jina AI Reader. Perfect for discussing articles, docs, or web content.", "Utility"),
     ]
     for name, desc, category in new_features:
         if db_session.query(BotFeature).filter(BotFeature.name == name).first():
@@ -290,6 +291,18 @@ BANNED_PATTERNS = [
     re.compile(r"system32", re.IGNORECASE),
 ]
 
+# URL detection and SSRF protection
+URL_PATTERN = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+', re.IGNORECASE)
+BLOCKED_URL_PATTERNS = [
+    re.compile(r'localhost', re.IGNORECASE),
+    re.compile(r'127\.0\.0\.', re.IGNORECASE),
+    re.compile(r'192\.168\.', re.IGNORECASE),
+    re.compile(r'10\.', re.IGNORECASE),
+    re.compile(r'172\.(1[6-9]|2[0-9]|3[01])\.', re.IGNORECASE),
+    re.compile(r'169\.254\.', re.IGNORECASE),
+    re.compile(r'file://', re.IGNORECASE),
+]
+
 # Channel memory constants
 CHANNEL_MEMORY_MAX_DAYS = 14
 CHANNEL_MEMORY_MAX_MESSAGES = 200
@@ -335,6 +348,41 @@ def _contains_banned(text: str) -> bool:
         if pattern.search(text):
             return True
     return False
+
+
+def _is_safe_url(url: str) -> bool:
+    """Check if URL is safe (not localhost, private IPs, file:// etc)."""
+    for pattern in BLOCKED_URL_PATTERNS:
+        if pattern.search(url):
+            return False
+    return True
+
+
+def _extract_urls(text: str) -> list[str]:
+    """Extract and validate URLs from text. Returns up to 3 safe URLs."""
+    urls = URL_PATTERN.findall(text)
+    safe_urls = [u for u in urls if _is_safe_url(u)][:3]
+    return safe_urls
+
+
+async def fetch_url_content(url: str, max_chars: int = 3000) -> str | None:
+    """Fetch and extract text from a URL using Jina AI Reader. Returns None on error."""
+    try:
+        jina_url = f"https://r.jina.ai/{url}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(jina_url, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                if response.status != 200:
+                    log.warning(f"Jina AI Reader failed for {url}: HTTP {response.status}")
+                    return None
+                text = await response.text()
+                text = text.strip()[:max_chars]
+                return text if text else None
+    except asyncio.TimeoutError:
+        log.warning(f"URL fetch timeout: {url}")
+        return None
+    except Exception as e:
+        log.error(f"URL fetch error {url}: {e}")
+        return None
 
 
 def has_premium(user_id) -> bool:
@@ -415,6 +463,22 @@ def set_user_persona(user_id, persona_id: str) -> None:
         db_session.commit()
     except Exception as e:
         log.error(f"set_user_persona error: {e}")
+
+
+def get_ai_feature_context() -> str:
+    """Fetch all active bot features to make the AI aware of its capabilities."""
+    try:
+        features = db_session.query(BotFeature).filter(BotFeature.is_active == True).all()
+        if not features:
+            return ""
+        lines = ["You have the following features enabled (as listed on your website):"]
+        for f in features:
+            premium_tag = " (Premium only)" if f.is_premium else ""
+            lines.append(f"- {f.name}: {f.description}{premium_tag}")
+        return "\n".join(lines)
+    except Exception as e:
+        log.error(f"Error fetching feature context: {e}")
+        return ""
 
 
 def is_rate_limited(user_id) -> bool:
@@ -512,8 +576,32 @@ async def get_ai_response(
 
     if extra_context is None:
         memories = get_user_memories(user_id)
+        feature_context = get_ai_feature_context()
+        
+        ctx_parts = []
+        if feature_context:
+            ctx_parts.append(feature_context)
         if memories:
-            extra_context = f"Things this user has asked you to remember: {memories}"
+            ctx_parts.append(f"Things this user has asked you to remember: {memories}")
+            
+        if ctx_parts:
+            extra_context = "\n\n".join(ctx_parts)
+
+    # Extract and fetch content from URLs in prompt
+    urls = _extract_urls(prompt)
+    if urls:
+        url_contents = []
+        for url in urls:
+            content = await fetch_url_content(url)
+            if content:
+                url_contents.append(f"[Content from {url}]\n{content}")
+        
+        if url_contents:
+            url_context = "\n\n".join(url_contents)
+            if extra_context:
+                extra_context = f"{extra_context}\n\n{url_context}"
+            else:
+                extra_context = url_context
 
     if system_prompt is None:
         persona_id = get_user_persona(user_id)
@@ -613,7 +701,16 @@ async def get_channel_aware_response(transcript: str, question: str, user_id) ->
     if settings["provider"] == "grok" and not has_premium(user_id):
         return "**Grok is a Premium feature.** Upgrade to use channel memory with Grok!"
 
-    prompt = _channel_memory_prompt(transcript, question)
+    feature_context = get_ai_feature_context()
+    memories = get_user_memories(user_id)
+    
+    extra_info = ""
+    if feature_context:
+        extra_info += f"\n\n{feature_context}"
+    if memories:
+        extra_info += f"\n\nThings this user has asked you to remember: {memories}"
+
+    prompt = _channel_memory_prompt(transcript, question) + extra_info
     if settings["provider"] == "grok":
         return await get_grok_response(prompt)
     return await get_gemini_response(prompt)
@@ -1232,6 +1329,7 @@ async def help_slash(interaction: discord.Interaction):
         name="Other",
         value=(
             "**DM me** or **@mention me** - I'll reply with AI.\n"
+            "**Share a URL** in your message - I'll read and summarize the web page content.\n"
             "**Right-click a message** → Apps → **Check message** (mods) - Toxicity check.\n"
             "In **support channels** (if configured), I may suggest replies or doc links."
         ),
