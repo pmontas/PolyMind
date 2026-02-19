@@ -1267,6 +1267,64 @@ async def story_continue_slash(interaction: discord.Interaction, action: str):
 bot.tree.add_command(story_group)
 
 
+# Reset command group
+reset_group = discord.app_commands.Group(name="reset", description="Reset quiz, persona, or both")
+
+
+@reset_group.command(name="quiz", description="Cancel the active quiz in this channel.")
+async def reset_quiz_slash(interaction: discord.Interaction):
+    channel_id = interaction.channel_id
+    if channel_id not in _quiz_state:
+        await interaction.response.send_message("No active quiz in this channel to reset.", ephemeral=True)
+        return
+
+    del _quiz_state[channel_id]
+    await interaction.response.send_message("✅ Quiz cancelled! Start a new one with `/quiz start <topic>`.", ephemeral=True)
+
+
+@reset_group.command(name="persona", description="Reset your persona back to the default (helpful).")
+async def reset_persona_slash(interaction: discord.Interaction):
+    current_persona = get_user_persona(interaction.user.id)
+    if current_persona == "helpful":
+        await interaction.response.send_message("Your persona is already set to the default (helpful).", ephemeral=True)
+        return
+
+    set_user_persona(interaction.user.id, "helpful")
+    await interaction.response.send_message("✅ Persona reset to **helpful**! I'll talk to you in my default style from now on.", ephemeral=True)
+
+
+@reset_group.command(name="all", description="Reset both active quiz and your persona.")
+async def reset_all_slash(interaction: discord.Interaction):
+    channel_id = interaction.channel_id
+    quiz_reset = channel_id in _quiz_state
+    if quiz_reset:
+        del _quiz_state[channel_id]
+
+    persona_reset = False
+    current_persona = get_user_persona(interaction.user.id)
+    if current_persona != "helpful":
+        set_user_persona(interaction.user.id, "helpful")
+        persona_reset = True
+
+    if not quiz_reset and not persona_reset:
+        await interaction.response.send_message("Nothing to reset - no active quiz in this channel and your persona is already default (helpful).", ephemeral=True)
+        return
+
+    message_parts = []
+    if quiz_reset:
+        message_parts.append("quiz cancelled")
+    if persona_reset:
+        message_parts.append("persona reset to helpful")
+
+    message = f"✅ {', '.join(message_parts)}!"
+    if quiz_reset:
+        message += " Start a new quiz with `/quiz start <topic>`."
+    await interaction.response.send_message(message, ephemeral=True)
+
+
+bot.tree.add_command(reset_group)
+
+
 @bot.tree.command(name="channel_digest", description="Summarize key topics and questions in this channel.")
 @discord.app_commands.describe(hours_back="How many hours of history (default 24)")
 async def channel_digest_slash(interaction: discord.Interaction, hours_back: int = 24):
@@ -1321,6 +1379,7 @@ async def help_slash(interaction: discord.Interaction):
             "**`/channel_digest`** [*hours_back*] - Summarize key topics in this channel.\n"
             "**`/quiz start`** *topic* - Start a trivia quiz. **`/quiz answer`** *number* *answer* - Submit answer.\n"
             "**`/story start`** [*premise*] - Start an adventure. **`/story continue`** *action* - Continue.\n"
+            "**`/reset quiz`** - Cancel active quiz. **`/reset persona`** - Reset to default style. **`/reset all`** - Reset both.\n"
             "**`/help`** - Show this message."
         ),
         inline=False,
