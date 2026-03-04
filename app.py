@@ -96,12 +96,13 @@ def init_db():
             BotFeature(name="Smart Message Splitting", description="Automatically handles long AI responses without crashing.", category="Utility", is_premium=False),
             BotFeature(name="User Rate Limiting", description="Protects the bot from spam with configurable per-user limits.", category="Safety", is_premium=False),
             BotFeature(name="Owner-Only Controls", description="Secure management commands locked to the bot creator.", category="Safety", is_premium=False),
-            BotFeature(name="Channel Memory", description="Ask about this channel's recent messages (e.g. what did Carolyn say Friday?) with /ask_channel.", category="Utility", is_premium=False),
+            BotFeature(name="Channel Memory", description="Ask about this channel's recent messages (e.g. what did Carolyn say Friday?) with /ask_channel.", category="Utility", is_premium=True),
             BotFeature(name="Personas & Memory", description="Set your style (helpful, sarcastic, pirate, ELI5) with /mode. Remember facts with /remember and /recall.", category="Utility", is_premium=False),
-            BotFeature(name="Quiz & Story", description="Start trivia with /quiz start and adventures with /story start. Great for community nights.", category="Fun", is_premium=False),
-            BotFeature(name="Summaries & Digest", description="Summarize a thread with /summarize_thread or channel topics with /channel_digest.", category="Utility", is_premium=False),
-            BotFeature(name="Moderation & Support", description="Mods can right-click a message and Check message for toxicity. Support channels get AI reply suggestions.", category="Safety", is_premium=False),
+            BotFeature(name="Quiz & Story", description="Start trivia with /quiz start and adventures with /story start. Great for community nights.", category="Fun", is_premium=True),
+            BotFeature(name="Summaries & Digest", description="Summarize a thread with /summarize_thread or channel topics with /channel_digest.", category="Utility", is_premium=True),
+            BotFeature(name="Moderation & Support", description="Mods can right-click a message and Check message for toxicity. Premium users get AI reply suggestions in support channels.", category="Safety", is_premium=True),
             BotFeature(name="RSS Digest", description="Optional scheduled or on-demand AI summaries of RSS feeds posted to a channel.", category="Integration", is_premium=False),
+            BotFeature(name="Link Reader", description="Share any URL in chat and I'll read and summarize its content. Perfect for discussing articles, docs, or web content.", category="Utility", is_premium=True),
         ]
         db_session.add_all(features)
         db_session.commit()
@@ -116,7 +117,7 @@ def ensure_channel_memory_feature():
         name="Channel Memory",
         description="Ask about this channel's recent messages (e.g. what did Carolyn say Friday?) with /ask_channel.",
         category="Utility",
-        is_premium=False,
+        is_premium=True,
     ))
     db_session.commit()
     log.info("Added 'Channel Memory' feature to database.")
@@ -125,24 +126,42 @@ def ensure_channel_memory_feature():
 def ensure_new_features():
     """Add new feature rows if missing (for existing deployments)."""
     new_features = [
-        ("Personas & Memory", "Set your style (helpful, sarcastic, pirate, ELI5) with /mode. Remember facts with /remember and /recall.", "Utility"),
-        ("Quiz & Story", "Start trivia with /quiz start and adventures with /story start. Great for community nights.", "Fun"),
-        ("Summaries & Digest", "Summarize a thread with /summarize_thread or channel topics with /channel_digest.", "Utility"),
-        ("Moderation & Support", "Mods can right-click a message and Check message for toxicity. Support channels get AI reply suggestions.", "Safety"),
-        ("RSS Digest", "Optional scheduled or on-demand AI summaries of RSS feeds posted to a channel.", "Integration"),
-        ("Link Reader", "Share any URL in chat and I'll read and summarize its content using Jina AI Reader. Perfect for discussing articles, docs, or web content.", "Utility"),
+        ("Personas & Memory", "Set your style (helpful, sarcastic, pirate, ELI5) with /mode. Remember facts with /remember and /recall.", "Utility", False),
+        ("Quiz & Story", "Start trivia with /quiz start and adventures with /story start. Great for community nights.", "Fun", True),
+        ("Summaries & Digest", "Summarize a thread with /summarize_thread or channel topics with /channel_digest.", "Utility", True),
+        ("Moderation & Support", "Mods can right-click a message and Check message for toxicity. Premium users get AI reply suggestions in support channels.", "Safety", True),
+        ("RSS Digest", "Optional scheduled or on-demand AI summaries of RSS feeds posted to a channel.", "Integration", False),
+        ("Link Reader", "Share any URL in chat and I'll read and summarize its content. Perfect for discussing articles, docs, or web content.", "Utility", True),
     ]
-    for name, desc, category in new_features:
+    for name, desc, category, is_premium in new_features:
         if db_session.query(BotFeature).filter(BotFeature.name == name).first():
             continue
-        db_session.add(BotFeature(name=name, description=desc, category=category, is_premium=False))
+        db_session.add(BotFeature(name=name, description=desc, category=category, is_premium=is_premium))
     db_session.commit()
     log.info("Ensured new features in database.")
+
+
+def ensure_premium_feature_updates():
+    """Set is_premium=True for token-heavy features (sync website with bot gating)."""
+    premium_feature_names = [
+        "Channel Memory",
+        "Quiz & Story",
+        "Summaries & Digest",
+        "Moderation & Support",
+        "Link Reader",
+    ]
+    for name in premium_feature_names:
+        row = db_session.query(BotFeature).filter(BotFeature.name == name).first()
+        if row and not row.is_premium:
+            row.is_premium = True
+            log.info(f"Updated feature '{name}' to Premium on website.")
+    db_session.commit()
 
 
 init_db()
 ensure_channel_memory_feature()
 ensure_new_features()
+ensure_premium_feature_updates()
 
 # --- WEB SERVER (FLASK) ---
 flask_app = Flask(__name__)
