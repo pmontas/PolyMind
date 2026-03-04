@@ -237,6 +237,10 @@ settings = {
     "cooldown_msg": "Slow down! You've reached your limit of {limit} messages per minute. Upgrade to Premium for higher limits!",
 }
 
+# Global API rate limits (to stay under Google/XAI free tier limits)
+GLOBAL_API_LIMIT_MINUTE = int(os.getenv("GLOBAL_API_LIMIT_MINUTE", "50"))  # Max AI calls per minute
+GLOBAL_API_LIMIT_HOUR = int(os.getenv("GLOBAL_API_LIMIT_HOUR", "800"))    # Max AI calls per hour
+
 # --- RATE LIMIT TRACKER (with automatic cleanup) ---
 _user_usage: dict[int, list[float]] = {}
 _RATE_LIMIT_WINDOW = 60  # seconds
@@ -254,6 +258,58 @@ def _cleanup_rate_limits():
     stale_keys = [uid for uid, timestamps in _user_usage.items() if not timestamps or now - timestamps[-1] > _RATE_LIMIT_WINDOW]
     for key in stale_keys:
         del _user_usage[key]
+
+
+# --- GLOBAL API USAGE TRACKER ---
+_global_api_usage: list[float] = []  # Timestamps of all AI API calls
+
+
+def _cleanup_global_api_usage():
+    """Remove API call timestamps older than 1 hour."""
+    global _global_api_usage
+    now = time.time()
+    _global_api_usage = [t for t in _global_api_usage if now - t < 3600]  # Keep last hour
+
+
+def can_make_api_call() -> bool:
+    """Check if we can make another AI API call without hitting global limits."""
+    _cleanup_global_api_usage()
+    now = time.time()
+
+    # Check minute limit (last 60 seconds)
+    minute_calls = sum(1 for t in _global_api_usage if now - t < 60)
+    if minute_calls >= GLOBAL_API_LIMIT_MINUTE:
+        return False
+
+    # Check hour limit (last 3600 seconds)
+    hour_calls = len(_global_api_usage)
+    if hour_calls >= GLOBAL_API_LIMIT_HOUR:
+        return False
+
+    return True
+
+
+def record_api_call():
+    """Record that an AI API call was made."""
+    _global_api_usage.append(time.time())
+
+
+def get_api_usage_stats() -> dict:
+    """Get current API usage statistics."""
+    _cleanup_global_api_usage()
+    now = time.time()
+
+    minute_calls = sum(1 for t in _global_api_usage if now - t < 60)
+    hour_calls = len(_global_api_usage)
+
+    return {
+        "minute_calls": minute_calls,
+        "minute_limit": GLOBAL_API_LIMIT_MINUTE,
+        "hour_calls": hour_calls,
+        "hour_limit": GLOBAL_API_LIMIT_HOUR,
+        "minute_usage_percent": (minute_calls / GLOBAL_API_LIMIT_MINUTE) * 100 if GLOBAL_API_LIMIT_MINUTE > 0 else 0,
+        "hour_usage_percent": (hour_calls / GLOBAL_API_LIMIT_HOUR) * 100 if GLOBAL_API_LIMIT_HOUR > 0 else 0,
+    }
 
 
 # AI SYSTEM PROMPT
@@ -510,11 +566,19 @@ def _build_full_prompt(system_prompt: str, prompt: str, extra_context: str | Non
 async def get_gemini_response(prompt: str, system_prompt: str | None = None, extra_context: str | None = None) -> str:
     if not gemini_model:
         return "Gemini is not configured. Please contact the bot owner."
+
+    # Check global API rate limit
+    if not can_make_api_call():
+        log.warning("Global API rate limit exceeded - blocking Gemini call")
+        return "The bot is currently at its API limit. Please try again in a moment."
+
     sys = system_prompt if system_prompt else AI_SYSTEM_PROMPT
     full = _build_full_prompt(sys, prompt, extra_context)
     try:
         response = await asyncio.to_thread(gemini_model.generate_content, full)
-        return response.text if response and response.text else "Gemini returned an empty response."
+        result = response.text if response and response.text else "Gemini returned an empty response."
+        record_api_call()  # Record successful API call
+        return result
     except Exception as e:
         log.error(f"Gemini error: {e}")
         return "Something went wrong with the AI. Try again in a moment."
@@ -534,6 +598,12 @@ def _grok_system_content(system_prompt: str, extra_context: str | None) -> str:
 async def get_grok_response(prompt: str, system_prompt: str | None = None, extra_context: str | None = None) -> str:
     if not XAI_KEY:
         return "Grok is not configured. Please contact the bot owner."
+
+    # Check global API rate limit
+    if not can_make_api_call():
+        log.warning("Global API rate limit exceeded - blocking Grok call")
+        return "The bot is currently at its API limit. Please try again in a moment."
+
     sys = system_prompt if system_prompt else AI_SYSTEM_PROMPT
     system_content = _grok_system_content(sys, extra_context)
     headers = {"Authorization": f"Bearer {XAI_KEY}", "Content-Type": "application/json"}
@@ -550,7 +620,9 @@ async def get_grok_response(prompt: str, system_prompt: str | None = None, extra
             async with session.post(XAI_API_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as response:
                 if response.status == 200:
                     data = await response.json()
-                    return data['choices'][0]['message']['content']
+                    result = data['choices'][0]['message']['content']
+                    record_api_call()  # Record successful API call
+                    return result
                 body = await response.text()
                 log.error(f"Grok API error: {response.status} - {body[:500]}")
                 return "Grok encountered an error. Try again in a moment."
@@ -971,13 +1043,20 @@ async def bot_status(ctx):
     membership = get_membership_display(ctx.author.id)
     limit = settings["rate_limit_premium"] if has_premium(ctx.author.id) else settings["rate_limit_free"]
     persona = get_user_persona(ctx.author.id)
+
+    # Get API usage stats
+    api_stats = get_api_usage_stats()
+
     await ctx.send(
         f"**PolyMind System Report**\n"
         f"Brain: **{settings['provider'].upper()}**\n"
         f"Mode: **{persona}**\n"
         f"Your Premium: {premium}\n"
         f"Membership detected: **{membership}**\n"
-        f"Rate Limit: {limit} msg/min"
+        f"Rate Limit: {limit} msg/min\n\n"
+        f"**Global API Usage**\n"
+        f"Last minute: {api_stats['minute_calls']}/{api_stats['minute_limit']} ({api_stats['minute_usage_percent']:.1f}%)\n"
+        f"Last hour: {api_stats['hour_calls']}/{api_stats['hour_limit']} ({api_stats['hour_usage_percent']:.1f}%)"
     )
 
 
