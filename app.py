@@ -659,21 +659,25 @@ async def get_ai_response(
         if ctx_parts:
             extra_context = "\n\n".join(ctx_parts)
 
-    # Extract and fetch content from URLs in prompt
+    # Extract and fetch content from URLs in prompt (Premium only - token-heavy)
     urls = _extract_urls(prompt)
     if urls:
-        url_contents = []
-        for url in urls:
-            content = await fetch_url_content(url)
-            if content:
-                url_contents.append(f"[Content from {url}]\n{content}")
-        
-        if url_contents:
-            url_context = "\n\n".join(url_contents)
-            if extra_context:
-                extra_context = f"{extra_context}\n\n{url_context}"
-            else:
-                extra_context = url_context
+        if has_premium(user_id):
+            url_contents = []
+            for url in urls:
+                content = await fetch_url_content(url)
+                if content:
+                    url_contents.append(f"[Content from {url}]\n{content}")
+            if url_contents:
+                url_context = "\n\n".join(url_contents)
+                if extra_context:
+                    extra_context = f"{extra_context}\n\n{url_context}"
+                else:
+                    extra_context = url_context
+        elif extra_context is None:
+            extra_context = "[User included links; link reading is a Premium feature. You may briefly mention they can upgrade to have links summarized.]"
+        else:
+            extra_context = f"{extra_context}\n\n[User included links; link reading is a Premium feature.]"
 
     if system_prompt is None:
         persona_id = get_user_persona(user_id)
@@ -1115,6 +1119,10 @@ async def ask_channel_slash(interaction: discord.Interaction, question: str, day
         await interaction.followup.send("Use this command in a server text channel.", ephemeral=True)
         return
 
+    if not has_premium(interaction.user.id):
+        await interaction.followup.send("**Channel memory** (`/ask_channel`) is a **Premium** feature. Upgrade to ask about this channel's messages!", ephemeral=True)
+        return
+
     if is_rate_limited(interaction.user.id):
         limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
         await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
@@ -1192,6 +1200,10 @@ async def summarize_thread_slash(interaction: discord.Interaction):
         await interaction.followup.send("Use this command inside a **thread**.", ephemeral=True)
         return
 
+    if not has_premium(interaction.user.id):
+        await interaction.followup.send("**Thread summaries** are a **Premium** feature. Upgrade to summarize threads!", ephemeral=True)
+        return
+
     if is_rate_limited(interaction.user.id):
         limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
         await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
@@ -1222,6 +1234,9 @@ quiz_group = discord.app_commands.Group(name="quiz", description="Trivia quiz: s
 @discord.app_commands.describe(topic="Topic for the quiz (e.g. Science, History)")
 async def quiz_start_slash(interaction: discord.Interaction, topic: str):
     await interaction.response.defer(thinking=True)
+    if not has_premium(interaction.user.id):
+        await interaction.followup.send("**Trivia quizzes** are a **Premium** feature. Upgrade to start quizzes!", ephemeral=True)
+        return
     if is_rate_limited(interaction.user.id):
         limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
         await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
@@ -1282,6 +1297,9 @@ story_group = discord.app_commands.Group(name="story", description="Multi-turn s
 @discord.app_commands.describe(premise="Optional starting premise (e.g. You are in a haunted castle)")
 async def story_start_slash(interaction: discord.Interaction, premise: str = ""):
     await interaction.response.defer(thinking=True)
+    if not has_premium(interaction.user.id):
+        await interaction.followup.send("**Story adventures** are a **Premium** feature. Upgrade to play!", ephemeral=True)
+        return
     if is_rate_limited(interaction.user.id):
         limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
         await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
@@ -1310,6 +1328,9 @@ async def story_start_slash(interaction: discord.Interaction, premise: str = "")
 @discord.app_commands.describe(action="What you do next (e.g. Open the door)")
 async def story_continue_slash(interaction: discord.Interaction, action: str):
     await interaction.response.defer(thinking=True)
+    if not has_premium(interaction.user.id):
+        await interaction.followup.send("**Story adventures** are a **Premium** feature. Upgrade to play!", ephemeral=True)
+        return
     if is_rate_limited(interaction.user.id):
         limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
         await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
@@ -1413,6 +1434,10 @@ async def channel_digest_slash(interaction: discord.Interaction, hours_back: int
         await interaction.followup.send("Use this command in a server text channel.", ephemeral=True)
         return
 
+    if not has_premium(interaction.user.id):
+        await interaction.followup.send("**Channel digest** is a **Premium** feature. Upgrade to get channel summaries!", ephemeral=True)
+        return
+
     if is_rate_limited(interaction.user.id):
         limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
         await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
@@ -1450,14 +1475,14 @@ async def help_slash(interaction: discord.Interaction):
         name="Slash commands",
         value=(
             "**`/ask`** *question* - Ask me anything.\n"
-            "**`/ask_channel`** *question* [*days_back*] - Ask about this channel's recent messages.\n"
+            "**`/ask_channel`** *(Premium)* - Ask about this channel's recent messages.\n"
             "**`/mode`** *persona* - Set style: helpful, sarcastic, pirate, eli5.\n"
             "**`/remember`** *fact* - Store something I'll remember about you.\n"
             "**`/recall`** - See what I've remembered about you.\n"
-            "**`/summarize_thread`** - Summarize this thread (use inside a thread).\n"
-            "**`/channel_digest`** [*hours_back*] - Summarize key topics in this channel.\n"
-            "**`/quiz start`** *topic* - Start a trivia quiz. **`/quiz answer`** *number* *answer* - Submit answer.\n"
-            "**`/story start`** [*premise*] - Start an adventure. **`/story continue`** *action* - Continue.\n"
+            "**`/summarize_thread`** *(Premium)* - Summarize this thread (use inside a thread).\n"
+            "**`/channel_digest`** *(Premium)* - Summarize key topics in this channel.\n"
+            "**`/quiz start`** *(Premium)* - Start a trivia quiz. **`/quiz answer`** - Submit answer.\n"
+            "**`/story start`** *(Premium)* - Start an adventure. **`/story continue`** *(Premium)* - Continue.\n"
             "**`/reset quiz`** - Cancel active quiz. **`/reset persona`** - Reset to default style. **`/reset all`** - Reset both.\n"
             "**`/help`** - Show this message."
         ),
@@ -1467,9 +1492,9 @@ async def help_slash(interaction: discord.Interaction):
         name="Other",
         value=(
             "**DM me** or **@mention me** - I'll reply with AI.\n"
-            "**Share a URL** in your message - I'll read and summarize the web page content.\n"
+            "**Share a URL** *(Premium)* - I'll read and summarize the web page content.\n"
             "**Right-click a message** → Apps → **Check message** (mods) - Toxicity check.\n"
-            "In **support channels** (if configured), I may suggest replies or doc links."
+            "In **support channels** (if configured), Premium users get AI reply suggestions."
         ),
         inline=False,
     )
@@ -1484,7 +1509,7 @@ async def help_slash(interaction: discord.Interaction):
         ),
         inline=False,
     )
-    embed.set_footer(text="Premium: higher limits + Grok brain. Subscribe via Discord.")
+    embed.set_footer(text="Premium: Grok brain, higher limits, channel/thread digest, quiz, story, link reading, support suggestions. Subscribe via Discord.")
     await interaction.followup.send(embed=embed)
 
 
@@ -1618,7 +1643,7 @@ async def on_message(message):
     else:
         if SUPPORT_CHANNEL_IDS and str(message.channel.id) in SUPPORT_CHANNEL_IDS:
             content = (message.content or "").strip()
-            if content and not content.startswith("!"):
+            if content and not content.startswith("!") and has_premium(message.author.id):
                 now = time.time()
                 last = _support_last_suggestion.get(message.channel.id, 0)
                 if now - last >= _SUPPORT_COOLDOWN_SEC:
