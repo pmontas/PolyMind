@@ -222,10 +222,13 @@ if not PREMIUM_SKU_ID:
     log.warning("PREMIUM_SKU_ID is not set. Premium detection will not work.")
 
 MOD_ALERTS_CHANNEL_ID = os.getenv("MOD_ALERTS_CHANNEL_ID")
+FEEDBACK_CHANNEL_ID = os.getenv("FEEDBACK_CHANNEL_ID")
 SUPPORT_CHANNEL_IDS = [x.strip() for x in os.getenv("SUPPORT_CHANNEL_IDS", "").split(",") if x.strip()]
 SUPPORT_DOC_URLS = [x.strip() for x in os.getenv("SUPPORT_DOC_URLS", "").split(",") if x.strip()]
 _support_last_suggestion: dict[int, float] = {}
 _SUPPORT_COOLDOWN_SEC = 120
+_feedback_last_used: dict[int, float] = {}
+_FEEDBACK_COOLDOWN_SEC = 300  # 5 min between feedback per user
 
 RSS_FEEDS = [x.strip() for x in os.getenv("RSS_FEEDS", "").split(",") if x.strip()]
 RSS_POST_CHANNEL_ID = os.getenv("RSS_POST_CHANNEL_ID")
@@ -1482,6 +1485,67 @@ async def channel_digest_slash(interaction: discord.Interaction, hours_back: int
         await interaction.followup.send("Something went wrong. Try again!", ephemeral=True)
 
 
+@bot.tree.command(name="feedback", description="Send feedback to the bot owner (bug reports, suggestions, etc.).")
+@discord.app_commands.describe(
+    message="Your feedback message",
+    feedback_type="Type of feedback (optional)",
+)
+@discord.app_commands.choices(feedback_type=[
+    discord.app_commands.Choice(name="Bug report", value="bug"),
+    discord.app_commands.Choice(name="Suggestion", value="suggestion"),
+    discord.app_commands.Choice(name="Other", value="other"),
+])
+async def feedback_slash(interaction: discord.Interaction, message: str, feedback_type: str = "other"):
+    message = (message or "").strip()[:1000]
+    if not message:
+        await interaction.response.send_message("Please provide your feedback message.", ephemeral=True)
+        return
+
+    if not FEEDBACK_CHANNEL_ID:
+        await interaction.response.send_message("Feedback is not configured for this bot.", ephemeral=True)
+        return
+
+    now = time.time()
+    user_id = interaction.user.id
+    if user_id in _feedback_last_used and (now - _feedback_last_used[user_id]) < _FEEDBACK_COOLDOWN_SEC:
+        wait = int(_FEEDBACK_COOLDOWN_SEC - (now - _feedback_last_used[user_id]))
+        await interaction.response.send_message(f"You can send feedback again in **{wait}** seconds.", ephemeral=True)
+        return
+    _feedback_last_used[user_id] = now
+
+    channel = bot.get_channel(int(FEEDBACK_CHANNEL_ID))
+    if not channel:
+        await interaction.response.send_message("Feedback channel is not available. Try again later.", ephemeral=True)
+        return
+
+    guild_name = interaction.guild.name if interaction.guild else "DM"
+    guild_id = interaction.guild.id if interaction.guild else None
+    channel_name = getattr(interaction.channel, "name", "DM")
+
+    embed = discord.Embed(
+        title=f"📬 Feedback ({feedback_type})",
+        description=message,
+        color=discord.Color.blue(),
+        timestamp=datetime.datetime.utcnow(),
+    )
+    embed.set_author(
+        name=f"{interaction.user.display_name} ({interaction.user.name})",
+        icon_url=interaction.user.display_avatar.url,
+    )
+    embed.add_field(name="User ID", value=f"`{interaction.user.id}`", inline=True)
+    embed.add_field(name="Server", value=guild_name if guild_name else "—", inline=True)
+    if guild_id:
+        embed.add_field(name="Channel", value=f"#{channel_name}", inline=True)
+    embed.set_footer(text="Use /feedback to reply to this user")
+
+    try:
+        await channel.send(embed=embed)
+        await interaction.response.send_message("✅ Thanks! Your feedback was sent to the team.", ephemeral=True)
+    except Exception as e:
+        log.error(f"Feedback send error: {e}")
+        await interaction.response.send_message("Could not send feedback. Try again later.", ephemeral=True)
+
+
 @bot.tree.command(name="help", description="See everything PolyMind can do.")
 async def help_slash(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -1503,6 +1567,7 @@ async def help_slash(interaction: discord.Interaction):
             "**`/quiz start`** *(Premium)* - Start a trivia quiz. **`/quiz answer`** - Submit answer.\n"
             "**`/story start`** *(Premium)* - Start an adventure. **`/story continue`** *(Premium)* - Continue.\n"
             "**`/reset quiz`** - Cancel active quiz. **`/reset persona`** - Reset to default style. **`/reset all`** - Reset both.\n"
+            "**`/feedback`** *message* [*type*] - Send feedback (bug, suggestion, other) to the team.\n"
             "**`/help`** - Show this message."
         ),
         inline=False,
