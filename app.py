@@ -1546,6 +1546,65 @@ async def feedback_slash(interaction: discord.Interaction, message: str, feedbac
         await interaction.response.send_message("Could not send feedback. Try again later.", ephemeral=True)
 
 
+@bot.tree.command(name="suggestfeature", description="Suggest a new feature for PolyMind. We love hearing your ideas!")
+@discord.app_commands.describe(
+    suggestion="Describe the feature you'd like to see",
+    title="Short title for your suggestion (optional)",
+)
+async def suggestfeature_slash(interaction: discord.Interaction, suggestion: str, title: str = ""):
+    suggestion = (suggestion or "").strip()[:1000]
+    title = (title or "").strip()[:100]
+
+    if not suggestion:
+        await interaction.response.send_message("Please describe the feature you'd like to suggest.", ephemeral=True)
+        return
+
+    if not FEEDBACK_CHANNEL_ID:
+        await interaction.response.send_message("Feature suggestions are not configured for this bot.", ephemeral=True)
+        return
+
+    now = time.time()
+    user_id = interaction.user.id
+    if user_id in _feedback_last_used and (now - _feedback_last_used[user_id]) < _FEEDBACK_COOLDOWN_SEC:
+        wait = int(_FEEDBACK_COOLDOWN_SEC - (now - _feedback_last_used[user_id]))
+        await interaction.response.send_message(f"You can send another suggestion or feedback in **{wait}** seconds.", ephemeral=True)
+        return
+    _feedback_last_used[user_id] = now
+
+    channel = bot.get_channel(int(FEEDBACK_CHANNEL_ID))
+    if not channel:
+        await interaction.response.send_message("Suggestions channel is not available. Try again later.", ephemeral=True)
+        return
+
+    guild_name = interaction.guild.name if interaction.guild else "DM"
+    channel_name = getattr(interaction.channel, "name", "DM")
+
+    embed = discord.Embed(
+        title=f"💡 Feature suggestion" + (f": {title}" if title else ""),
+        description=suggestion,
+        color=discord.Color.gold(),
+        timestamp=datetime.datetime.utcnow(),
+    )
+    embed.set_author(
+        name=f"{interaction.user.display_name} ({interaction.user.name})",
+        icon_url=interaction.user.display_avatar.url,
+    )
+    embed.add_field(name="User ID", value=f"`{interaction.user.id}`", inline=True)
+    embed.add_field(name="Server", value=guild_name if guild_name else "—", inline=True)
+    embed.add_field(name="Channel", value=f"#{channel_name}", inline=True)
+    embed.set_footer(text="Use /feedback or /suggestfeature to reply to this user")
+
+    try:
+        await channel.send(embed=embed)
+        await interaction.response.send_message(
+            "✅ **Thanks!** We love hearing your ideas. Your feature suggestion was sent to the team — we read every one!",
+            ephemeral=True,
+        )
+    except Exception as e:
+        log.error(f"Suggest feature send error: {e}")
+        await interaction.response.send_message("Could not send your suggestion. Try again later.", ephemeral=True)
+
+
 @bot.tree.command(name="help", description="See everything PolyMind can do.")
 async def help_slash(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -1568,6 +1627,7 @@ async def help_slash(interaction: discord.Interaction):
             "**`/story start`** *(Premium)* - Start an adventure. **`/story continue`** *(Premium)* - Continue.\n"
             "**`/reset quiz`** - Cancel active quiz. **`/reset persona`** - Reset to default style. **`/reset all`** - Reset both.\n"
             "**`/feedback`** *message* [*type*] - Send feedback (bug, suggestion, other) to the team.\n"
+            "**`/suggestfeature`** *suggestion* [*title*] - Suggest a new feature. We read every idea!\n"
             "**`/help`** - Show this message."
         ),
         inline=False,
@@ -1576,6 +1636,7 @@ async def help_slash(interaction: discord.Interaction):
         name="Other",
         value=(
             "**DM me** or **@mention me** - I'll reply with AI.\n"
+            "**Got an idea?** Use **`/suggestfeature`** or **`/feedback`** — we'd love to hear from you.\n"
             "**Share a URL** *(Premium)* - I'll read and summarize the web page content.\n"
             "**Right-click a message** → Apps → **Check message** (mods) - Toxicity check.\n"
             "In **support channels** (if configured), Premium users get AI reply suggestions."
