@@ -146,3 +146,19 @@ On startup with tasks enabled:
 - Once per day per task (timezone-aware via `timezone` option or `DEFAULT_TZ` env).
 - **research** tasks may require paid Gemini billing for Google Search grounding.
 - Task tick runs every 60s; exact minute match required (Azure Always On required in production).
+
+---
+
+## 8. Usage analytics (`!usage`) — Owner only
+
+**What it does:** Logs anonymous usage events to SQLite for monitoring active servers and Premium gate hits.
+
+| Step | Action | Expected result |
+|------|--------|------------------|
+| 8.1 | Run `/ask` or @mention the bot in a server | Event recorded (owner-only; not visible to users). |
+| 8.2 | As bot owner, run `!usage` in a server channel | Report arrives in your **DMs only**; command message is deleted if possible. |
+| 8.3 | Non-owner runs `!usage` | No response (silent). |
+| 8.4 | Run `!usage 7 <guild_id>` | Breakdown for one server. |
+| 8.5 | Try a Premium command without Premium (e.g. `/channel_digest`) | `channel_digest_blocked` increments in `!usage`. |
+
+**Env:** `USAGE_METRICS_ENABLED=true` (default). Set `false` to disable. Events auto-delete after 90 days.

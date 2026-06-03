@@ -184,6 +184,7 @@ flask_app = Flask(__name__)
 
 # OAuth2 invite URL (bot + applications.commands)
 BOT_CLIENT_ID = os.getenv("BOT_CLIENT_ID", "1472960650870259763")
+BOT_OWNER_ID = os.getenv("BOT_OWNER_ID")  # Optional: restrict owner commands to this Discord user ID
 BOT_INVITE_URL = f"https://discord.com/oauth2/authorize?client_id={BOT_CLIENT_ID}&permissions=2147609600&integration_type=0&scope=bot%20applications.commands"
 
 
@@ -281,6 +282,9 @@ GLOBAL_API_LIMIT_HOUR = int(os.getenv("GLOBAL_API_LIMIT_HOUR", "800"))    # Max 
 
 # Scheduled tasks (BETA) — lazy-loaded module; kill switch for production
 SCHEDULED_TASKS_ENABLED = os.getenv("SCHEDULED_TASKS_ENABLED", "true").lower() in ("1", "true", "yes")
+
+# Usage metrics — lightweight analytics; failures never affect the bot
+USAGE_METRICS_ENABLED = os.getenv("USAGE_METRICS_ENABLED", "true").lower() in ("1", "true", "yes")
 
 # --- RATE LIMIT TRACKER (with automatic cleanup) ---
 _user_usage: dict[int, list[float]] = {}
@@ -562,6 +566,22 @@ def set_user_persona(user_id, persona_id: str) -> None:
         log.error(f"set_user_persona error: {e}")
 
 
+def clear_user_memories(user_id) -> int:
+    """Delete all /remember facts for a user. Returns number of rows removed."""
+    try:
+        count = (
+            db_session.query(UserMemory)
+            .filter(UserMemory.user_id == str(user_id))
+            .delete()
+        )
+        db_session.commit()
+        return count
+    except Exception as e:
+        log.error(f"clear_user_memories error: {e}")
+        db_session.rollback()
+        return 0
+
+
 def get_ai_feature_context() -> str:
     """Fetch all active bot features to make the AI aware of its capabilities."""
     try:
@@ -578,7 +598,7 @@ def get_ai_feature_context() -> str:
         return ""
 
 
-def is_rate_limited(user_id) -> bool:
+def is_rate_limited(user_id, guild_id=None) -> bool:
     """Checks if a user has exceeded their per-minute limit."""
     _cleanup_rate_limits()
     now = time.time()
@@ -589,6 +609,7 @@ def is_rate_limited(user_id) -> bool:
 
     _user_usage[user_id] = [t for t in _user_usage[user_id] if now - t < _RATE_LIMIT_WINDOW]
     if len(_user_usage[user_id]) >= limit:
+        track("rate_limited", guild_id=guild_id, user_id=user_id)
         return True
 
     _user_usage[user_id].append(now)
@@ -665,6 +686,48 @@ def _load_scheduled_tasks():
     except Exception as e:
         log.error("Scheduled tasks module failed to load — feature disabled: %s", e)
         return None
+
+
+def _init_usage_metrics():
+    """Initialize usage metrics module. Returns module or None on failure."""
+    if not USAGE_METRICS_ENABLED:
+        log.info("Usage metrics disabled (USAGE_METRICS_ENABLED=false).")
+        return None
+    try:
+        import usage_metrics
+        usage_metrics.setup_models(Base, engine)
+        return usage_metrics
+    except Exception as e:
+        log.error("Usage metrics failed to load — analytics disabled: %s", e)
+        return None
+
+
+_usage_metrics_mod = _init_usage_metrics()
+
+
+def track(event_type: str, *, guild_id=None, user_id=None) -> None:
+    """Fire-and-forget usage event. Never raises."""
+    if _usage_metrics_mod:
+        try:
+            _usage_metrics_mod.record(event_type, guild_id=guild_id, user_id=user_id)
+        except Exception:
+            pass
+
+
+async def is_bot_owner(user) -> bool:
+    """True if user is the configured owner or Discord application owner."""
+    if BOT_OWNER_ID and str(user.id) == str(BOT_OWNER_ID).strip():
+        return True
+    try:
+        return await bot.is_owner(user)
+    except Exception:
+        return False
+
+
+async def _send_owner_dm(user, text: str) -> None:
+    """Send a private message to the bot owner only."""
+    for chunk in split_message(text):
+        await user.send(chunk)
 
 
 # Current xAI chat model (grok-beta is deprecated). Use grok-3-mini, grok-3, or grok-4-1-fast-reasoning.
@@ -1147,6 +1210,62 @@ async def bot_status(ctx):
     )
 
 
+@bot.command(name='usage')
+@commands.is_owner()
+async def usage_stats(ctx, days: int = 7, guild_id: str = None):
+    """(Owner only) Usage analytics — report is sent to your DMs only."""
+    if BOT_OWNER_ID and str(ctx.author.id) != str(BOT_OWNER_ID).strip():
+        return
+    if not _usage_metrics_mod:
+        try:
+            await _send_owner_dm(ctx.author, "Usage metrics are disabled or unavailable.")
+        except discord.Forbidden:
+            pass
+        return
+    days = max(1, min(365, days))
+    if guild_id:
+        guild_id = guild_id.strip()
+        if not guild_id.isdigit():
+            try:
+                await _send_owner_dm(
+                    ctx.author,
+                    "Invalid guild ID. Usage: `!usage 7` or `!usage 7 123456789012345678`",
+                )
+            except discord.Forbidden:
+                pass
+            return
+        detail = _usage_metrics_mod.get_guild_detail(guild_id, days)
+        text = _usage_metrics_mod.format_guild_report(detail, bot)
+    else:
+        summary = _usage_metrics_mod.get_summary(days)
+        text = _usage_metrics_mod.format_report(summary, bot)
+
+    if ctx.guild:
+        try:
+            await ctx.message.delete()
+        except (discord.Forbidden, discord.NotFound):
+            pass
+
+    try:
+        await _send_owner_dm(ctx.author, text)
+    except discord.Forbidden:
+        if ctx.guild:
+            try:
+                await ctx.author.send(
+                    "I couldn't DM you the usage report. Enable **Direct Messages** from server members "
+                    "(Privacy & Safety → allow DMs from this server), then run `!usage` again."
+                )
+            except discord.Forbidden:
+                pass
+
+
+@usage_stats.error
+async def usage_stats_error(ctx, error):
+    if isinstance(error, commands.NotOwner):
+        return
+    log.error(f"!usage error: {error}")
+
+
 @bot.command(name='mode')
 async def mode_prefix(ctx, persona: str = None):
     """Set or show your persona. Usage: !mode [helpful|sarcastic|pirate|eli5]"""
@@ -1168,11 +1287,12 @@ async def mode_prefix(ctx, persona: str = None):
 async def ask_slash(interaction: discord.Interaction, question: str):
     await interaction.response.defer(thinking=True)
 
-    if is_rate_limited(interaction.user.id):
+    if is_rate_limited(interaction.user.id, guild_id=interaction.guild_id):
         limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
         await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
         return
 
+    track("ask", guild_id=interaction.guild_id, user_id=interaction.user.id)
     try:
         response = await get_ai_response(question, interaction.user.id)
         chunks = split_message(response)
@@ -1203,10 +1323,11 @@ async def ask_channel_slash(interaction: discord.Interaction, question: str, day
         return
 
     if not has_premium(interaction.user.id):
+        track("ask_channel_blocked", guild_id=interaction.guild.id, user_id=interaction.user.id)
         await interaction.followup.send("**Channel memory** (`/ask_channel`) is a **Premium** feature. Upgrade to ask about this channel's messages!", ephemeral=True)
         return
 
-    if is_rate_limited(interaction.user.id):
+    if is_rate_limited(interaction.user.id, guild_id=interaction.guild.id):
         limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
         await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
         return
@@ -1220,6 +1341,7 @@ async def ask_channel_slash(interaction: discord.Interaction, question: str, day
         await interaction.followup.send(err, ephemeral=True)
         return
 
+    track("ask_channel", guild_id=interaction.guild.id, user_id=interaction.user.id)
     try:
         response = await get_channel_aware_response(transcript, question, interaction.user.id)
         chunks = split_message(response)
@@ -1284,10 +1406,11 @@ async def summarize_thread_slash(interaction: discord.Interaction):
         return
 
     if not has_premium(interaction.user.id):
+        track("summarize_thread_blocked", guild_id=interaction.guild_id, user_id=interaction.user.id)
         await interaction.followup.send("**Thread summaries** are a **Premium** feature. Upgrade to summarize threads!", ephemeral=True)
         return
 
-    if is_rate_limited(interaction.user.id):
+    if is_rate_limited(interaction.user.id, guild_id=interaction.guild_id):
         limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
         await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
         return
@@ -1318,9 +1441,10 @@ quiz_group = discord.app_commands.Group(name="quiz", description="Trivia quiz: s
 async def quiz_start_slash(interaction: discord.Interaction, topic: str):
     await interaction.response.defer(thinking=True)
     if not has_premium(interaction.user.id):
+        track("quiz_blocked", guild_id=interaction.guild_id, user_id=interaction.user.id)
         await interaction.followup.send("**Trivia quizzes** are a **Premium** feature. Upgrade to start quizzes!", ephemeral=True)
         return
-    if is_rate_limited(interaction.user.id):
+    if is_rate_limited(interaction.user.id, guild_id=interaction.guild_id):
         limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
         await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
         return
@@ -1381,9 +1505,10 @@ story_group = discord.app_commands.Group(name="story", description="Multi-turn s
 async def story_start_slash(interaction: discord.Interaction, premise: str = ""):
     await interaction.response.defer(thinking=True)
     if not has_premium(interaction.user.id):
+        track("story_blocked", guild_id=interaction.guild_id, user_id=interaction.user.id)
         await interaction.followup.send("**Story adventures** are a **Premium** feature. Upgrade to play!", ephemeral=True)
         return
-    if is_rate_limited(interaction.user.id):
+    if is_rate_limited(interaction.user.id, guild_id=interaction.guild_id):
         limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
         await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
         return
@@ -1412,9 +1537,10 @@ async def story_start_slash(interaction: discord.Interaction, premise: str = "")
 async def story_continue_slash(interaction: discord.Interaction, action: str):
     await interaction.response.defer(thinking=True)
     if not has_premium(interaction.user.id):
+        track("story_blocked", guild_id=interaction.guild_id, user_id=interaction.user.id)
         await interaction.followup.send("**Story adventures** are a **Premium** feature. Upgrade to play!", ephemeral=True)
         return
-    if is_rate_limited(interaction.user.id):
+    if is_rate_limited(interaction.user.id, guild_id=interaction.guild_id):
         limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
         await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
         return
@@ -1465,18 +1591,54 @@ async def reset_quiz_slash(interaction: discord.Interaction):
     await interaction.response.send_message("✅ Quiz cancelled! Start a new one with `/quiz start <topic>`.", ephemeral=True)
 
 
-@reset_group.command(name="persona", description="Reset your persona back to the default (helpful).")
+@reset_group.command(name="persona", description="Reset your persona and clear stored memories that affect how I talk to you.")
 async def reset_persona_slash(interaction: discord.Interaction):
     current_persona = get_user_persona(interaction.user.id)
-    if current_persona == "helpful":
-        await interaction.response.send_message("Your persona is already set to the default (helpful).", ephemeral=True)
+    had_memories = bool(get_user_memories(interaction.user.id))
+    had_custom_persona = current_persona != "helpful"
+
+    if not had_custom_persona and not had_memories:
+        await interaction.response.send_message(
+            "Nothing to reset — your persona is already **helpful** and you have no stored memories. "
+            "Use `/recall` to check what I remember about you.",
+            ephemeral=True,
+        )
         return
 
     set_user_persona(interaction.user.id, "helpful")
-    await interaction.response.send_message("✅ Persona reset to **helpful**! I'll talk to you in my default style from now on.", ephemeral=True)
+    cleared = clear_user_memories(interaction.user.id)
+
+    parts = ["persona → **helpful**"]
+    if cleared:
+        parts.append(f"cleared **{cleared}** remembered fact(s)")
+    elif had_memories:
+        parts.append("cleared stored memories")
+
+    await interaction.response.send_message(
+        "✅ Reset complete: " + ", ".join(parts) + ".\n"
+        "I'll use my default style from now on. Use `/mode` to pick a preset style if you want.",
+        ephemeral=True,
+    )
 
 
-@reset_group.command(name="all", description="Reset both active quiz and your persona.")
+@reset_group.command(name="memory", description="Clear everything PolyMind remembers about you (/remember facts only).")
+async def reset_memory_slash(interaction: discord.Interaction):
+    memories = get_user_memories(interaction.user.id)
+    if not memories:
+        await interaction.response.send_message(
+            "I don't have any stored memories for you. Use `/recall` to check anytime.",
+            ephemeral=True,
+        )
+        return
+
+    cleared = clear_user_memories(interaction.user.id)
+    await interaction.response.send_message(
+        f"✅ Cleared **{cleared}** remembered fact(s). This won't change your `/mode` persona — use `/reset persona` for that too.",
+        ephemeral=True,
+    )
+
+
+@reset_group.command(name="all", description="Reset quiz, persona, and stored memories.")
 async def reset_all_slash(interaction: discord.Interaction):
     channel_id = interaction.channel_id
     quiz_reset = channel_id in _quiz_state
@@ -1489,8 +1651,14 @@ async def reset_all_slash(interaction: discord.Interaction):
         set_user_persona(interaction.user.id, "helpful")
         persona_reset = True
 
-    if not quiz_reset and not persona_reset:
-        await interaction.response.send_message("Nothing to reset - no active quiz in this channel and your persona is already default (helpful).", ephemeral=True)
+    had_memories = bool(get_user_memories(interaction.user.id))
+    cleared = clear_user_memories(interaction.user.id) if had_memories else 0
+
+    if not quiz_reset and not persona_reset and cleared == 0:
+        await interaction.response.send_message(
+            "Nothing to reset — no active quiz, persona is already default, and no stored memories.",
+            ephemeral=True,
+        )
         return
 
     message_parts = []
@@ -1498,6 +1666,8 @@ async def reset_all_slash(interaction: discord.Interaction):
         message_parts.append("quiz cancelled")
     if persona_reset:
         message_parts.append("persona reset to helpful")
+    if cleared:
+        message_parts.append(f"{cleared} remembered fact(s) cleared")
 
     message = f"✅ {', '.join(message_parts)}!"
     if quiz_reset:
@@ -1518,10 +1688,11 @@ async def channel_digest_slash(interaction: discord.Interaction, hours_back: int
         return
 
     if not has_premium(interaction.user.id):
+        track("channel_digest_blocked", guild_id=interaction.guild.id, user_id=interaction.user.id)
         await interaction.followup.send("**Channel digest** is a **Premium** feature. Upgrade to get channel summaries!", ephemeral=True)
         return
 
-    if is_rate_limited(interaction.user.id):
+    if is_rate_limited(interaction.user.id, guild_id=interaction.guild.id):
         limit = settings["rate_limit_premium"] if has_premium(interaction.user.id) else settings["rate_limit_free"]
         await interaction.followup.send(settings["cooldown_msg"].format(limit=limit), ephemeral=True)
         return
@@ -1666,6 +1837,21 @@ async def suggestfeature_slash(interaction: discord.Interaction, suggestion: str
         await interaction.response.send_message("Could not send your suggestion. Try again later.", ephemeral=True)
 
 
+async def _help_prefix_commands_text(user) -> str:
+    lines = [
+        "**`!status`** - Brain, mode, premium, rate limit.",
+        "**`!mode`** [*persona*] - Set or show persona.",
+    ]
+    if await is_bot_owner(user):
+        lines.extend([
+            "**`!usage`** [*days*] [*guild_id*] - (Owner only) Usage analytics via DM.",
+            "**`!assistant`** *gemini|grok* - (Owner only) Switch AI brain.",
+            "**`!addfeature`** - (Owner only) Add a feature to the website.",
+            "**`!addpremium <user_id>`** - (Owner only) Grant test premium.",
+        ])
+    return "\n".join(lines)
+
+
 @bot.tree.command(name="help", description="See everything PolyMind can do.")
 async def help_slash(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -1686,7 +1872,7 @@ async def help_slash(interaction: discord.Interaction):
             "**`/channel_digest`** *(Premium)* - Summarize key topics in this channel.\n"
             "**`/quiz start`** *(Premium)* - Start a trivia quiz. **`/quiz answer`** - Submit answer.\n"
             "**`/story start`** *(Premium)* - Start an adventure. **`/story continue`** *(Premium)* - Continue.\n"
-            "**`/reset quiz`** - Cancel active quiz. **`/reset persona`** - Reset to default style. **`/reset all`** - Reset both.\n"
+            "**`/reset quiz`** - Cancel active quiz. **`/reset persona`** - Reset style + memories. **`/reset memory`** - Clear `/remember` facts. **`/reset all`** - Reset everything.\n"
             "**`/feedback`** *message* [*type*] - Send feedback (bug, suggestion, other) to the team.\n"
             "**`/suggestfeature`** *suggestion* [*title*] - Suggest a new feature. We read every idea!\n"
             "**`/help`** - Show this message."
@@ -1716,13 +1902,7 @@ async def help_slash(interaction: discord.Interaction):
     )
     embed.add_field(
         name="Prefix commands (optional)",
-        value=(
-            "**`!status`** - Brain, mode, premium, rate limit.\n"
-            "**`!mode`** [*persona*] - Set or show persona.\n"
-            "**`!assistant`** *gemini|grok* - (Owner only) Switch AI brain.\n"
-            "**`!addfeature`** - (Owner only) Add a feature to the website.\n"
-            "**`!addpremium <user_id>`** - (Owner only) Grant test premium."
-        ),
+        value=_help_prefix_commands_text(interaction.user),
         inline=False,
     )
     embed.set_footer(text="Premium: Grok brain, higher limits, channel/thread digest, quiz, story, link reading, support suggestions. Subscribe via Discord.")
@@ -1857,11 +2037,16 @@ async def on_message(message):
         if not content and not is_dm:
             return
 
-        if is_rate_limited(message.author.id):
+        guild_id = message.guild.id if message.guild else None
+        if is_rate_limited(message.author.id, guild_id=guild_id):
             limit = settings["rate_limit_premium"] if has_premium(message.author.id) else settings["rate_limit_free"]
             await message.reply(settings["cooldown_msg"].format(limit=limit))
             return
 
+        if _extract_urls(content):
+            track("link_shared", guild_id=guild_id, user_id=message.author.id)
+
+        track("ask_dm" if is_dm else "ask", guild_id=guild_id, user_id=message.author.id)
         async with message.channel.typing():
             try:
                 response = await get_ai_response(content, message.author.id)

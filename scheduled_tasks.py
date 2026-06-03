@@ -308,6 +308,11 @@ async def run_scheduled_task(task) -> None:
         for chunk in app.split_message(header + result):
             await channel.send(chunk[:2000])
         _record_task_success(task.id)
+        try:
+            if hasattr(app, "track"):
+                app.track("task_run", guild_id=task.guild_id, user_id=task.user_id)
+        except Exception:
+            pass
 
     except Exception as e:
         log.exception("Task #%s execution error: %s", task.id, e)
@@ -485,6 +490,13 @@ async def task_create_slash(
         app.db_session.rollback()
         await interaction.followup.send("Could not save the task. Try again later.", ephemeral=True)
         return
+
+    try:
+        app_mod = _app()
+        if hasattr(app_mod, "track"):
+            app_mod.track("task_create", guild_id=interaction.guild.id, user_id=interaction.user.id)
+    except Exception:
+        pass
 
     msg = (
         f"✅ **Task #{task_id} created** ({_task_type_label(task_type)})\n"
