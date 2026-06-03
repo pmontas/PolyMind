@@ -158,10 +158,26 @@ def ensure_premium_feature_updates():
     db_session.commit()
 
 
+def ensure_scheduled_tasks_feature():
+    """Add Scheduled Tasks (BETA) feature row if missing."""
+    name = "Scheduled Tasks (BETA)"
+    if db_session.query(BotFeature).filter(BotFeature.name == name).first():
+        return
+    db_session.add(BotFeature(
+        name=name,
+        description="Automate daily posts to any channel — RSS digests, AI summaries, or live news research. Up to 5 tasks per server (10 with Premium).",
+        category="Integration",
+        is_premium=False,
+    ))
+    db_session.commit()
+    log.info("Added 'Scheduled Tasks (BETA)' feature to database.")
+
+
 init_db()
 ensure_channel_memory_feature()
 ensure_new_features()
 ensure_premium_feature_updates()
+ensure_scheduled_tasks_feature()
 
 # --- WEB SERVER (FLASK) ---
 flask_app = Flask(__name__)
@@ -262,6 +278,9 @@ settings = {
 # Global API rate limits (to stay under Google/XAI free tier limits)
 GLOBAL_API_LIMIT_MINUTE = int(os.getenv("GLOBAL_API_LIMIT_MINUTE", "50"))  # Max AI calls per minute
 GLOBAL_API_LIMIT_HOUR = int(os.getenv("GLOBAL_API_LIMIT_HOUR", "800"))    # Max AI calls per hour
+
+# Scheduled tasks (BETA) — lazy-loaded module; kill switch for production
+SCHEDULED_TASKS_ENABLED = os.getenv("SCHEDULED_TASKS_ENABLED", "true").lower() in ("1", "true", "yes")
 
 # --- RATE LIMIT TRACKER (with automatic cleanup) ---
 _user_usage: dict[int, list[float]] = {}
@@ -604,6 +623,48 @@ async def get_gemini_response(prompt: str, system_prompt: str | None = None, ext
     except Exception as e:
         log.error(f"Gemini error: {e}")
         return "Something went wrong with the AI. Try again in a moment."
+
+
+async def get_gemini_grounded_response(prompt: str) -> str:
+    """Gemini with Google Search grounding for live web research (scheduled tasks only)."""
+    if not gemini_model:
+        return "Gemini is not configured. Please contact the bot owner."
+    if not can_make_api_call():
+        log.warning("Global API rate limit exceeded - blocking grounded Gemini call")
+        return "The bot is currently at its API limit. Please try again in a moment."
+
+    full = _build_full_prompt(AI_SYSTEM_PROMPT, prompt)
+    try:
+        def _call():
+            return gemini_model.generate_content(full, tools="google_search_retrieval")
+
+        response = await asyncio.to_thread(_call)
+        result = response.text if response and response.text else "Gemini returned an empty response."
+        record_api_call()
+        return result
+    except Exception as e:
+        log.error(f"Gemini grounded error: {e}")
+        err = str(e).lower()
+        if "quota" in err or "billing" in err or "permission" in err or "403" in err:
+            return (
+                "Live web research is unavailable (API quota or billing). "
+                "Try an RSS task with specific feed URLs instead."
+            )
+        return "Something went wrong with live research. Try again later or use an RSS task."
+
+
+def _load_scheduled_tasks():
+    """Lazy-load scheduled tasks module. Returns module or None on failure."""
+    if not SCHEDULED_TASKS_ENABLED:
+        log.info("Scheduled tasks disabled (SCHEDULED_TASKS_ENABLED=false).")
+        return None
+    try:
+        import scheduled_tasks
+        scheduled_tasks.setup_models(Base, engine)
+        return scheduled_tasks
+    except Exception as e:
+        log.error("Scheduled tasks module failed to load — feature disabled: %s", e)
+        return None
 
 
 # Current xAI chat model (grok-beta is deprecated). Use grok-3-mini, grok-3, or grok-4-1-fast-reasoning.
@@ -1633,6 +1694,16 @@ async def help_slash(interaction: discord.Interaction):
         inline=False,
     )
     embed.add_field(
+        name="Scheduled tasks (BETA)",
+        value=(
+            "**`/task create`** - Schedule a daily post (RSS, AI, digest, or live research).\n"
+            "**`/task list`** - View this server's tasks and active count.\n"
+            "**`/task pause`** / **`/task resume`** / **`/task delete`** - Manage tasks by ID.\n"
+            "**`/task help`** - Full guide with examples and limits."
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="Other",
         value=(
             "**DM me** or **@mention me** - I'll reply with AI.\n"
@@ -1746,6 +1817,14 @@ async def on_ready():
     log.info(f"PolyMind logged in as {bot.user} (ID: {bot.user.id})")
     log.info(f"Connected to {len(bot.guilds)} guild(s)")
 
+    tasks_mod = _load_scheduled_tasks()
+    if tasks_mod:
+        try:
+            tasks_mod.register_task_commands(bot)
+        except Exception as e:
+            log.error("Scheduled tasks command registration failed — core bot continues: %s", e)
+            tasks_mod = None
+
     if not _commands_synced:
         try:
             synced = await bot.tree.sync()
@@ -1755,6 +1834,12 @@ async def on_ready():
             log.error(f"Failed to sync slash commands: {e}")
 
     start_rss_scheduler()
+
+    if tasks_mod:
+        try:
+            tasks_mod.start_task_scheduler(bot)
+        except Exception as e:
+            log.error("Scheduled tasks scheduler failed to start — core bot continues: %s", e)
 
 
 @bot.event

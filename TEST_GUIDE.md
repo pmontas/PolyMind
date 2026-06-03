@@ -91,3 +91,58 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_APP_ID&permissions=...&s
 ```
 
 Replace `YOUR_APP_ID` with your application ID and adjust `permissions` as needed. Include **Read Message History** (e.g. `2048` or a role that has it) for `/ask_channel` to work in those channels.
+
+---
+
+## 7. Scheduled tasks (`/task`) — BETA
+
+**What it does:** Schedule daily automated posts to a channel — RSS digests, AI prompts, channel digests, or live web research.
+
+### Prerequisites
+
+- Bot needs **Send Messages** in the target channel.
+- For **digest** tasks: **Read Message History** in that channel.
+- Production scheduling requires Azure **Always On** (Basic tier+).
+- Env: `SCHEDULED_TASKS_ENABLED=true` (default). Set `false` to disable the feature entirely.
+
+### Create and manage
+
+| Step | Action | Expected result |
+|------|--------|------------------|
+| 7.1 | Run `/task help` | Ephemeral embed explains types, limits (5/10), and examples. |
+| 7.2 | `/task create` type **ai**, time `09:00`, channel #general, prompt `Say hello` | Task created with ID; shows active count (e.g. 1/5). |
+| 7.3 | `/task list` | Shows task #id, type, time, channel, active/paused status. |
+| 7.4 | `/task pause <id>` then `/task list` | Task shows paused; active count decreases. |
+| 7.5 | `/task resume <id>` | Task active again (blocked if at cap). |
+| 7.6 | `/task delete <id>` | Task removed; slot freed. |
+
+### Task types
+
+| Step | Action | Expected result |
+|------|--------|------------------|
+| 7.7 | **rss** with valid feed URLs | At scheduled time, bot posts RSS summary to channel. |
+| 7.8 | **ai** with a custom prompt | At scheduled time, bot posts AI response. |
+| 7.9 | **digest** in a channel with messages | At scheduled time, bot posts channel recap. |
+| 7.10 | **research** with a news prompt | Uses Gemini + Google Search; may fail on free tier (clear error). |
+
+### Limits and isolation
+
+| Step | Action | Expected result |
+|------|--------|------------------|
+| 7.11 | Create tasks until server hits **5/5** active (or 10 with Premium) | Create/resume blocked with upgrade message. |
+| 7.12 | Set `SCHEDULED_TASKS_ENABLED=false`, restart | Bot starts; `/task` absent; `/ask` still works. |
+| 7.13 | Invalid RSS URL in task | After 3 failures, task auto-pauses; other tasks unaffected. |
+
+### Console checks
+
+On startup with tasks enabled:
+
+- `ScheduledTask table ready.`
+- `Registered /task command group.`
+- `Scheduled tasks tick scheduler started (every 60s).`
+
+### Known limitations
+
+- Once per day per task (timezone-aware via `timezone` option or `DEFAULT_TZ` env).
+- **research** tasks may require paid Gemini billing for Google Search grounding.
+- Task tick runs every 60s; exact minute match required (Azure Always On required in production).

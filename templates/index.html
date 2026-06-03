@@ -15,6 +15,9 @@
         .premium-badge {
             background: linear-gradient(to right, #f59e0b, #d97706);
         }
+        .beta-badge {
+            background: linear-gradient(to right, #6366f1, #4f46e5);
+        }
     </style>
 </head>
 <body class="font-sans">
@@ -62,6 +65,10 @@
                 <div class="absolute top-4 right-4 premium-badge px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider text-white shadow-lg">
                     Premium
                 </div>
+                {% elif 'BETA' in feature.name %}
+                <div class="absolute top-4 right-4 beta-badge px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider text-white shadow-lg">
+                    Beta
+                </div>
                 {% endif %}
                 <div class="mb-4">
                     <span class="text-[10px] font-bold uppercase tracking-[0.2em] text-blue-400 bg-blue-400/10 px-3 py-1 rounded-full border border-blue-400/20">
@@ -80,6 +87,7 @@
             <h3 class="text-3xl font-bold mb-4">Simple Pricing</h3>
             <p class="text-slate-400 mb-2">Unlock the full power of PolyMind directly through Discord.</p>
             <p class="text-slate-500 text-sm">Premium includes channel memory, summaries, quiz & story, link reading, and support suggestions.</p>
+            <p class="text-slate-500 text-sm mt-2">Scheduled Tasks (BETA) — automate daily RSS, AI, or live news posts to any channel.</p>
         </div>
         
         <div class="grid md:grid-cols-2 gap-8">
@@ -103,6 +111,7 @@
                 <div class="text-4xl font-extrabold mb-6">$8.99<span class="text-lg text-slate-500 font-normal">/mo</span></div>
                 <ul class="space-y-4 mb-8 text-slate-300 text-sm">
                     <li class="flex items-center">🚀 20 messages per minute</li>
+                    <li class="flex items-center">📅 Scheduled Tasks: up to 10 active automations per server</li>
                     {% for feature in features if feature.is_premium %}
                     <li class="flex items-center">🧠 {{ feature.name }}</li>
                     {% endfor %}
