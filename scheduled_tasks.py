@@ -385,7 +385,7 @@ task_group = app_commands.Group(
 
 @task_group.command(
     name="create",
-    description="Schedule a daily post. Types: rss (feeds), ai (prompt), digest (channel summary), research (live web).",
+    description="Schedule a daily post. Types: rss, ai, digest, research. See /task help.",
 )
 @app_commands.describe(
     type="Task type: rss, ai, digest, or research",

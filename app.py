@@ -2012,6 +2012,7 @@ async def on_ready():
             _commands_synced = True
         except Exception as e:
             log.error(f"Failed to sync slash commands: {e}")
+            log.error("Slash commands will retry sync on next bot reconnect.")
 
     start_rss_scheduler()
 
