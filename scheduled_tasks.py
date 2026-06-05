@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 import feedparser
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import Column, Integer, String, Boolean, DateTime
 
 log = logging.getLogger("polymind.tasks")
@@ -24,6 +25,7 @@ TASK_LIMIT_DEFAULT = int(os.getenv("TASK_LIMIT_DEFAULT", "5"))
 TASK_LIMIT_PREMIUM = int(os.getenv("TASK_LIMIT_PREMIUM", "10"))
 DEFAULT_TZ = os.getenv("DEFAULT_TZ", "UTC")
 TASK_API_BUDGET_HOUR = int(os.getenv("TASK_API_BUDGET_HOUR", "200"))
+TASK_GRACE_MINUTES = int(os.getenv("TASK_GRACE_MINUTES", "30"))
 VALID_TASK_TYPES = frozenset({"ai", "rss", "digest", "research"})
 MAX_CONSECUTIVE_FAILURES = 3
 
@@ -137,17 +139,21 @@ def count_active_tasks(guild_id: str) -> int:
 
 
 def is_task_due(task, now_utc: datetime.datetime | None = None) -> bool:
+    """True if task should run today: at/after scheduled local time, within grace window, not yet run today."""
     now_utc = now_utc or datetime.datetime.utcnow()
     tz_name = validate_timezone(task.timezone) or "UTC"
     tz = ZoneInfo(tz_name)
     local_now = now_utc.replace(tzinfo=datetime.timezone.utc).astimezone(tz)
-    if local_now.hour != task.hour or local_now.minute != task.minute:
-        return False
+
     if task.last_run:
         last_utc = task.last_run.replace(tzinfo=datetime.timezone.utc)
         if last_utc.astimezone(tz).date() == local_now.date():
             return False
-    return True
+
+    scheduled = local_now.replace(hour=task.hour, minute=task.minute, second=0, microsecond=0)
+    delta_sec = (local_now - scheduled).total_seconds()
+    # Run once in the window [scheduled time, scheduled + grace] to survive tick drift / app wake
+    return 0 <= delta_sec <= TASK_GRACE_MINUTES * 60
 
 
 def get_due_tasks() -> list:
@@ -195,12 +201,61 @@ def _record_task_success(task_id: int):
         app.db_session.rollback()
 
 
-def _record_task_failure(task_id: int, reason: str):
+def _record_task_failure(task_id: int, reason: str) -> int:
     count = _task_failures.get(task_id, 0) + 1
     _task_failures[task_id] = count
     log.error("Task #%s failed (%s/%s): %s", task_id, count, MAX_CONSECUTIVE_FAILURES, reason)
+    app = _app()
+    try:
+        task = app.db_session.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+        if task:
+            task.last_run = datetime.datetime.utcnow()
+            app.db_session.commit()
+    except Exception as e:
+        log.error("Failed to update task #%s after failure: %s", task_id, e)
+        app.db_session.rollback()
     if count >= MAX_CONSECUTIVE_FAILURES:
         _pause_task(task_id, reason)
+    return count
+
+
+def _is_failed_ai_result(result: str) -> bool:
+    if not result or not result.strip():
+        return True
+    error_prefixes = (
+        "Something went wrong",
+        "The bot is currently",
+        "Gemini is not configured",
+        "Live web research is unavailable",
+        "Gemini returned an empty",
+    )
+    return any(result.strip().startswith(p) for p in error_prefixes)
+
+
+async def _resolve_channel(bot, channel_id: str):
+    """Get a text channel from cache or API."""
+    try:
+        cid = int(channel_id)
+    except (TypeError, ValueError):
+        return None
+    channel = bot.get_channel(cid)
+    if channel and isinstance(channel, discord.TextChannel):
+        return channel
+    try:
+        fetched = await bot.fetch_channel(cid)
+        if isinstance(fetched, discord.TextChannel):
+            return fetched
+    except Exception as e:
+        log.error("fetch_channel %s failed: %s", channel_id, e)
+    return None
+
+
+async def _notify_task_failure(channel, task_id: int, message: str, auto_paused: bool = False) -> None:
+    try:
+        extra = " Task **auto-paused** — fix the issue, then `/task resume`." if auto_paused else ""
+        await channel.send(f"⚠️ **Scheduled task #{task_id}** — {message}{extra}"[:2000])
+    except Exception as e:
+        log.error("Could not notify channel for task #%s: %s", task_id, e)
 
 
 async def fetch_rss_items(feed_urls: list[str]) -> str:
@@ -234,21 +289,28 @@ async def run_scheduled_task(task) -> None:
     app = _app()
     bot = app.bot
 
+    log.info("Running scheduled task #%s (%s) for guild %s", task.id, task.task_type, task.guild_id)
+
     if not app.can_make_api_call():
-        log.warning("Task #%s skipped: global API limit reached", task.id)
+        log.warning("Task #%s skipped: global API limit reached (will retry within grace window)", task.id)
         return
     if not can_make_task_api_call():
-        log.warning("Task #%s skipped: task API budget exhausted", task.id)
+        log.warning("Task #%s skipped: task API budget exhausted (will retry within grace window)", task.id)
         return
 
-    channel = bot.get_channel(int(task.channel_id))
-    if not channel or not isinstance(channel, discord.TextChannel):
-        _record_task_failure(task.id, "channel not found")
+    channel = await _resolve_channel(bot, task.channel_id)
+    if not channel:
+        count = _record_task_failure(task.id, "channel not found")
+        if count >= MAX_CONSECUTIVE_FAILURES:
+            log.warning("Task #%s auto-paused: channel not found", task.id)
         return
 
     perms = channel.permissions_for(channel.guild.me)
     if not perms.send_messages:
-        _record_task_failure(task.id, "no send permission")
+        count = _record_task_failure(task.id, "no send permission")
+        await _notify_task_failure(
+            channel, task.id, "I don't have permission to post here.", auto_paused=count >= MAX_CONSECUTIVE_FAILURES
+        )
         return
 
     task_type = (task.task_type or "").lower()
@@ -301,13 +363,21 @@ async def run_scheduled_task(task) -> None:
             _record_task_failure(task.id, f"unknown type {task_type}")
             return
 
-        if not result or result.startswith("Something went wrong") or result.startswith("The bot is currently"):
-            _record_task_failure(task.id, "AI returned error or empty")
+        if not result or _is_failed_ai_result(result):
+            reason = "AI returned error or empty"
+            count = _record_task_failure(task.id, reason)
+            await _notify_task_failure(
+                channel,
+                task.id,
+                result[:800] if result else reason,
+                auto_paused=count >= MAX_CONSECUTIVE_FAILURES,
+            )
             return
 
         for chunk in app.split_message(header + result):
             await channel.send(chunk[:2000])
         _record_task_success(task.id)
+        log.info("Task #%s completed successfully", task.id)
         try:
             if hasattr(app, "track"):
                 app.track("task_run", guild_id=task.guild_id, user_id=task.user_id)
@@ -316,7 +386,11 @@ async def run_scheduled_task(task) -> None:
 
     except Exception as e:
         log.exception("Task #%s execution error: %s", task.id, e)
-        _record_task_failure(task.id, str(e))
+        count = _record_task_failure(task.id, str(e))
+        if channel:
+            await _notify_task_failure(
+                channel, task.id, f"Execution error: {str(e)[:500]}", auto_paused=count >= MAX_CONSECUTIVE_FAILURES
+            )
 
 
 async def process_due_tasks():
@@ -352,9 +426,14 @@ def start_task_scheduler(bot) -> None:
         return
     try:
         _task_scheduler = BackgroundScheduler()
-        _task_scheduler.add_job(_task_tick_job, "interval", minutes=1, id="task_tick", replace_existing=True)
+        _task_scheduler.add_job(
+            _task_tick_job,
+            CronTrigger(second=0),
+            id="task_tick",
+            replace_existing=True,
+        )
         _task_scheduler.start()
-        log.info("Scheduled tasks tick scheduler started (every 60s).")
+        log.info("Scheduled tasks tick scheduler started (every minute at :00).")
     except Exception as e:
         log.error("Failed to start task scheduler: %s", e)
 
@@ -546,12 +625,54 @@ async def task_list_slash(interaction: discord.Interaction):
             )
             if t.run_count:
                 lines.append(f"   ↳ ran **{t.run_count}** time(s)")
+        lines.append("\n*To delete, pause, or resume: use the dropdown on `/task delete`, `/task pause`, or `/task resume`.*")
 
     await interaction.followup.send("\n".join(lines)[:2000], ephemeral=True)
 
 
+def _task_autocomplete_label(task, guild: discord.Guild | None) -> str:
+    """Short label for task picker (Discord choice name, max 100 chars)."""
+    ch = guild.get_channel(int(task.channel_id)) if guild else None
+    ch_label = f"#{ch.name}" if ch and hasattr(ch, "name") else "channel"
+    status = "active" if task.enabled else "paused"
+    return f"#{task.id} · {task.task_type} · {task.hour:02d}:{task.minute:02d} → {ch_label} ({status})"
+
+
+async def task_id_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[int]]:
+    """Suggest this server's tasks when picking delete / pause / resume."""
+    if not interaction.guild or not ScheduledTask:
+        return []
+    app = _app()
+    try:
+        tasks = (
+            app.db_session.query(ScheduledTask)
+            .filter(ScheduledTask.guild_id == str(interaction.guild.id))
+            .order_by(ScheduledTask.id)
+            .all()
+        )
+    except Exception as e:
+        log.debug("task_id_autocomplete error: %s", e)
+        app.db_session.rollback()
+        return []
+
+    needle = (current or "").lower().strip()
+    choices: list[app_commands.Choice[int]] = []
+    for t in tasks:
+        label = _task_autocomplete_label(t, interaction.guild)
+        if needle and needle not in label.lower() and not str(t.id).startswith(needle):
+            continue
+        choices.append(app_commands.Choice(name=label[:100], value=t.id))
+        if len(choices) >= 25:
+            break
+    return choices
+
+
 @task_group.command(name="delete", description="Delete a scheduled task (frees a slot). Creator or Manage Server only.")
-@app_commands.describe(task_id="Task ID from /task list")
+@app_commands.describe(task_id="Pick a task from the list (or run /task list)")
+@app_commands.autocomplete(task_id=task_id_autocomplete)
 async def task_delete_slash(interaction: discord.Interaction, task_id: int):
     await interaction.response.defer(ephemeral=True)
     if not interaction.guild:
@@ -561,7 +682,10 @@ async def task_delete_slash(interaction: discord.Interaction, task_id: int):
     app = _app()
     task = app.db_session.query(ScheduledTask).filter(ScheduledTask.id == task_id).first() if ScheduledTask else None
     if not task or str(task.guild_id) != str(interaction.guild.id):
-        await interaction.followup.send(f"Task **#{task_id}** not found in this server.", ephemeral=True)
+        await interaction.followup.send(
+            f"Task **#{task_id}** not found in this server. Run **`/task list`** or pick from the dropdown.",
+            ephemeral=True,
+        )
         return
     if not _can_manage_task(interaction, task):
         await interaction.followup.send("Only the task creator or someone with **Manage Server** can delete this.", ephemeral=True)
@@ -581,7 +705,8 @@ async def task_delete_slash(interaction: discord.Interaction, task_id: int):
 
 
 @task_group.command(name="pause", description="Pause a scheduled task (does not count toward the active limit).")
-@app_commands.describe(task_id="Task ID from /task list")
+@app_commands.describe(task_id="Pick a task from the list (or run /task list)")
+@app_commands.autocomplete(task_id=task_id_autocomplete)
 async def task_pause_slash(interaction: discord.Interaction, task_id: int):
     await interaction.response.defer(ephemeral=True)
     if not interaction.guild:
@@ -591,7 +716,10 @@ async def task_pause_slash(interaction: discord.Interaction, task_id: int):
     app = _app()
     task = app.db_session.query(ScheduledTask).filter(ScheduledTask.id == task_id).first() if ScheduledTask else None
     if not task or str(task.guild_id) != str(interaction.guild.id):
-        await interaction.followup.send(f"Task **#{task_id}** not found.", ephemeral=True)
+        await interaction.followup.send(
+            f"Task **#{task_id}** not found. Run **`/task list`** or pick from the dropdown.",
+            ephemeral=True,
+        )
         return
     if not _can_manage_task(interaction, task):
         await interaction.followup.send("Only the task creator or someone with **Manage Server** can pause this.", ephemeral=True)
@@ -606,7 +734,8 @@ async def task_pause_slash(interaction: discord.Interaction, task_id: int):
 
 
 @task_group.command(name="resume", description="Resume a paused task (blocked if server is at the active task cap).")
-@app_commands.describe(task_id="Task ID from /task list")
+@app_commands.describe(task_id="Pick a task from the list (or run /task list)")
+@app_commands.autocomplete(task_id=task_id_autocomplete)
 async def task_resume_slash(interaction: discord.Interaction, task_id: int):
     await interaction.response.defer(ephemeral=True)
     if not interaction.guild:
@@ -616,7 +745,10 @@ async def task_resume_slash(interaction: discord.Interaction, task_id: int):
     app = _app()
     task = app.db_session.query(ScheduledTask).filter(ScheduledTask.id == task_id).first() if ScheduledTask else None
     if not task or str(task.guild_id) != str(interaction.guild.id):
-        await interaction.followup.send(f"Task **#{task_id}** not found.", ephemeral=True)
+        await interaction.followup.send(
+            f"Task **#{task_id}** not found. Run **`/task list`** or pick from the dropdown.",
+            ephemeral=True,
+        )
         return
     if not _can_manage_task(interaction, task):
         await interaction.followup.send("Only the task creator or someone with **Manage Server** can resume this.", ephemeral=True)
@@ -683,7 +815,7 @@ async def task_help_slash(interaction: discord.Interaction):
             "feeds `https://feeds.bbci.co.uk/news/technology/rss.xml`\n"
             "`/task create` type **ai** time `09:00` channel #general "
             "prompt `Post one short motivational quote for developers.`\n"
-            "`/task list` · `/task pause 2` · `/task resume 2` · `/task delete 1`"
+            "`/task list` · pick a task on `/task pause` or `/task resume` or `/task delete`"
         ),
         inline=False,
     )

@@ -259,13 +259,22 @@ if not XAI_KEY:
     log.warning("XAI_API_KEY is not set. Grok will not be available.")
 
 gemini_model = None
+gemini_search_client = None
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 if GEMINI_KEY:
     try:
         genai.configure(api_key=GEMINI_KEY)
-        gemini_model = genai.GenerativeModel('gemini-3-flash-preview')
+        gemini_model = genai.GenerativeModel(GEMINI_MODEL)
         log.info("Gemini AI configured successfully.")
     except Exception as e:
         log.error(f"Error configuring Gemini: {e}")
+    try:
+        from google import genai as google_genai
+
+        gemini_search_client = google_genai.Client(api_key=GEMINI_KEY)
+        log.info("Gemini search client configured successfully.")
+    except Exception as e:
+        log.warning("Gemini search client unavailable (live research disabled): %s", e)
 
 # --- CONFIGURABLE SETTINGS ---
 settings = {
@@ -648,16 +657,26 @@ async def get_gemini_response(prompt: str, system_prompt: str | None = None, ext
 
 async def get_gemini_grounded_response(prompt: str) -> str:
     """Gemini with Google Search grounding for live web research (scheduled tasks only)."""
-    if not gemini_model:
-        return "Gemini is not configured. Please contact the bot owner."
+    if not gemini_search_client:
+        return "Gemini live search is not configured. Please contact the bot owner."
     if not can_make_api_call():
         log.warning("Global API rate limit exceeded - blocking grounded Gemini call")
         return "The bot is currently at its API limit. Please try again in a moment."
 
     full = _build_full_prompt(AI_SYSTEM_PROMPT, prompt)
     try:
+        from google.genai import types
+
+        config = types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())]
+        )
+
         def _call():
-            return gemini_model.generate_content(full, tools="google_search_retrieval")
+            return gemini_search_client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=full,
+                config=config,
+            )
 
         response = await asyncio.to_thread(_call)
         result = response.text if response and response.text else "Gemini returned an empty response."
