@@ -1874,58 +1874,68 @@ async def _help_prefix_commands_text(user) -> str:
 @bot.tree.command(name="help", description="See everything PolyMind can do.")
 async def help_slash(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    embed = discord.Embed(
-        title="PolyMind - What I Can Do",
-        description="I'm an AI assistant powered by Gemini and Grok. Here's how to use me.",
-        color=discord.Color.blue(),
-    )
-    embed.add_field(
-        name="Slash commands",
-        value=(
-            "**`/ask`** *question* - Ask me anything.\n"
-            "**`/ask_channel`** *(Premium)* - Ask about this channel's recent messages.\n"
-            "**`/mode`** *persona* - Set style: helpful, sarcastic, pirate, eli5.\n"
-            "**`/remember`** *fact* - Store something I'll remember about you.\n"
-            "**`/recall`** - See what I've remembered about you.\n"
-            "**`/summarize_thread`** *(Premium)* - Summarize this thread (use inside a thread).\n"
-            "**`/channel_digest`** *(Premium)* - Summarize key topics in this channel.\n"
-            "**`/quiz start`** *(Premium)* - Start a trivia quiz. **`/quiz answer`** - Submit answer.\n"
-            "**`/story start`** *(Premium)* - Start an adventure. **`/story continue`** *(Premium)* - Continue.\n"
-            "**`/reset quiz`** - Cancel active quiz. **`/reset persona`** - Reset style + memories. **`/reset memory`** - Clear `/remember` facts. **`/reset all`** - Reset everything.\n"
-            "**`/feedback`** *message* [*type*] - Send feedback (bug, suggestion, other) to the team.\n"
-            "**`/suggestfeature`** *suggestion* [*title*] - Suggest a new feature. We read every idea!\n"
-            "**`/help`** - Show this message."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Scheduled tasks (BETA)",
-        value=(
-            "**`/task create`** - Schedule a daily post (RSS, AI, digest, or live research).\n"
-            "**`/task list`** - View this server's tasks and active count.\n"
-            "**`/task pause`** / **`/task resume`** / **`/task delete`** - Manage tasks by ID.\n"
-            "**`/task help`** - Full guide with examples and limits."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Other",
-        value=(
-            "**DM me** or **@mention me** - I'll reply with AI.\n"
-            "**Got an idea?** Use **`/suggestfeature`** or **`/feedback`** — we'd love to hear from you.\n"
-            "**Share a URL** *(Premium)* - I'll read and summarize the web page content.\n"
-            "**Right-click a message** → Apps → **Check message** (mods) - Toxicity check.\n"
-            "In **support channels** (if configured), Premium users get AI reply suggestions."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Prefix commands (optional)",
-        value=_help_prefix_commands_text(interaction.user),
-        inline=False,
-    )
-    embed.set_footer(text="Premium: Grok brain, higher limits, channel/thread digest, quiz, story, link reading, support suggestions. Subscribe via Discord.")
-    await interaction.followup.send(embed=embed)
+    try:
+        embed = discord.Embed(
+            title="PolyMind - What I Can Do",
+            description="I'm an AI assistant powered by Gemini and Grok. Here's how to use me.",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(
+            name="Slash commands",
+            value=(
+                "**`/ask`** *question* - Ask me anything.\n"
+                "**`/ask_channel`** *(Premium)* - Ask about this channel's recent messages.\n"
+                "**`/mode`** *persona* - Set style: helpful, sarcastic, pirate, eli5.\n"
+                "**`/remember`** *fact* - Store something I'll remember about you.\n"
+                "**`/recall`** - See what I've remembered about you.\n"
+                "**`/summarize_thread`** *(Premium)* - Summarize this thread (use inside a thread).\n"
+                "**`/channel_digest`** *(Premium)* - Summarize key topics in this channel.\n"
+                "**`/quiz start`** *(Premium)* - Start a trivia quiz. **`/quiz answer`** - Submit answer.\n"
+                "**`/story start`** *(Premium)* - Start an adventure. **`/story continue`** *(Premium)* - Continue.\n"
+                "**`/reset quiz`** - Cancel active quiz. **`/reset persona`** - Reset style + memories. "
+                "**`/reset memory`** - Clear `/remember` facts. **`/reset all`** - Reset everything.\n"
+                "**`/feedback`** *message* [*type*] - Send feedback (bug, suggestion, other) to the team.\n"
+                "**`/suggestfeature`** *suggestion* [*title*] - Suggest a new feature. We read every idea!\n"
+                "**`/help`** - Show this message."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Scheduled tasks (BETA)",
+            value=(
+                "**`/task create`** - Schedule a daily post (RSS, AI, digest, or live research).\n"
+                "**`/task list`** - View this server's tasks and active count.\n"
+                "**`/task pause`** / **`/task resume`** / **`/task delete`** - Manage tasks by ID.\n"
+                "**`/task help`** - Full guide with examples and limits."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Other",
+            value=(
+                "**DM me** or **@mention me** - I'll reply with AI.\n"
+                "**Got an idea?** Use **`/suggestfeature`** or **`/feedback`** — we'd love to hear from you.\n"
+                "**Share a URL** *(Premium)* - I'll read and summarize the web page content.\n"
+                "**Right-click a message** → Apps → **Check message** (mods) - Toxicity check.\n"
+                "In **support channels** (if configured), Premium users get AI reply suggestions."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Prefix commands (optional)",
+            value=await _help_prefix_commands_text(interaction.user),
+            inline=False,
+        )
+        embed.set_footer(
+            text="Premium: Grok brain, higher limits, channel/thread digest, quiz, story, link reading, support suggestions. Subscribe via Discord."
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        log.error("help command error: %s", e)
+        await interaction.followup.send(
+            "Could not show help right now. Try `/ask`, `/task help`, or `/feedback`.",
+            ephemeral=True,
+        )
 
 
 @bot.tree.context_menu(name="Check message")
