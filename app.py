@@ -1881,21 +1881,35 @@ async def help_slash(interaction: discord.Interaction):
             color=discord.Color.blue(),
         )
         embed.add_field(
-            name="Slash commands",
+            name="AI & memory",
             value=(
                 "**`/ask`** *question* - Ask me anything.\n"
                 "**`/ask_channel`** *(Premium)* - Ask about this channel's recent messages.\n"
                 "**`/mode`** *persona* - Set style: helpful, sarcastic, pirate, eli5.\n"
                 "**`/remember`** *fact* - Store something I'll remember about you.\n"
-                "**`/recall`** - See what I've remembered about you.\n"
+                "**`/recall`** - See what I've remembered about you."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Summaries, quiz & story",
+            value=(
                 "**`/summarize_thread`** *(Premium)* - Summarize this thread (use inside a thread).\n"
                 "**`/channel_digest`** *(Premium)* - Summarize key topics in this channel.\n"
                 "**`/quiz start`** *(Premium)* - Start a trivia quiz. **`/quiz answer`** - Submit answer.\n"
-                "**`/story start`** *(Premium)* - Start an adventure. **`/story continue`** *(Premium)* - Continue.\n"
-                "**`/reset quiz`** - Cancel active quiz. **`/reset persona`** - Reset style + memories. "
-                "**`/reset memory`** - Clear `/remember` facts. **`/reset all`** - Reset everything.\n"
-                "**`/feedback`** *message* [*type*] - Send feedback (bug, suggestion, other) to the team.\n"
-                "**`/suggestfeature`** *suggestion* [*title*] - Suggest a new feature. We read every idea!\n"
+                "**`/story start`** *(Premium)* - Start an adventure. **`/story continue`** *(Premium)* - Continue."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Reset & feedback",
+            value=(
+                "**`/reset quiz`** - Cancel active quiz.\n"
+                "**`/reset persona`** - Reset style + memories.\n"
+                "**`/reset memory`** - Clear `/remember` facts.\n"
+                "**`/reset all`** - Reset everything.\n"
+                "**`/feedback`** *message* [*type*] - Send feedback to the team.\n"
+                "**`/suggestfeature`** *suggestion* [*title*] - Suggest a new feature.\n"
                 "**`/help`** - Show this message."
             ),
             inline=False,
