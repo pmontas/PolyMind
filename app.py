@@ -6,6 +6,7 @@ import json
 import secrets
 import urllib.parse
 import urllib.request
+import urllib.error
 from functools import wraps
 import aiohttp
 import asyncio
@@ -207,6 +208,10 @@ DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
 DISCORD_OAUTH_AUTHORIZE_URL = "https://discord.com/api/oauth2/authorize"
 DISCORD_OAUTH_TOKEN_URL = "https://discord.com/api/oauth2/token"
 DISCORD_API_USER_URL = "https://discord.com/api/users/@me"
+DISCORD_API_USER_AGENT = os.getenv(
+    "DISCORD_API_USER_AGENT",
+    "PolyMindAdmin (https://github.com/pmontas/PolyMind, 1.0)",
+)
 
 
 def _oauth_redirect_uri() -> str:
@@ -278,10 +283,27 @@ if not _admin_oauth_configured():
     log.warning("Admin dashboard OAuth disabled. Missing: %s", ", ".join(_admin_oauth_missing()))
 
 
+def _discord_api_headers(extra: dict | None = None) -> dict:
+    headers = {"User-Agent": DISCORD_API_USER_AGENT}
+    if extra:
+        headers.update(extra)
+    return headers
+
+
 def _discord_http_json(url: str, *, method: str = "GET", data: bytes | None = None, headers: dict | None = None):
-    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers=_discord_api_headers(headers),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")[:500]
+        log.error("Discord API HTTP %s for %s: %s", e.code, url, body)
+        raise
 
 
 def _exchange_oauth_code(code: str, redirect_uri: str) -> dict | None:
