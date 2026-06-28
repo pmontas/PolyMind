@@ -2,13 +2,18 @@ import discord
 from discord.ext import commands
 import os
 import re
+import json
+import secrets
+import urllib.parse
+import urllib.request
+from functools import wraps
 import aiohttp
 import asyncio
 import logging
 from dotenv import load_dotenv
 import datetime
 import google.generativeai as genai
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, redirect, session, url_for, abort
 from threading import Thread
 import traceback
 import time
@@ -186,6 +191,181 @@ flask_app = Flask(__name__)
 BOT_CLIENT_ID = os.getenv("BOT_CLIENT_ID", "1472960650870259763")
 BOT_OWNER_ID = os.getenv("BOT_OWNER_ID")  # Optional: restrict owner commands to this Discord user ID
 BOT_INVITE_URL = f"https://discord.com/oauth2/authorize?client_id={BOT_CLIENT_ID}&permissions=2147609600&integration_type=0&scope=bot%20applications.commands"
+
+# --- ADMIN DASHBOARD (OAuth2, owner-only) ---
+flask_app.secret_key = os.getenv("FLASK_SECRET_KEY", "")
+flask_app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=os.getenv("FLASK_SESSION_SECURE", "true").lower() in ("1", "true", "yes"),
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
+OAUTH_REDIRECT_URI = os.getenv(
+    "OAUTH_REDIRECT_URI",
+    "https://discorddev.azurewebsites.net/admin/callback",
+)
+DISCORD_OAUTH_AUTHORIZE_URL = "https://discord.com/api/oauth2/authorize"
+DISCORD_OAUTH_TOKEN_URL = "https://discord.com/api/oauth2/token"
+DISCORD_API_USER_URL = "https://discord.com/api/users/@me"
+
+
+def _admin_oauth_configured() -> bool:
+    return bool(
+        flask_app.secret_key
+        and DISCORD_CLIENT_SECRET
+        and BOT_OWNER_ID
+    )
+
+
+if not _admin_oauth_configured():
+    log.warning(
+        "Admin dashboard OAuth disabled: set FLASK_SECRET_KEY, DISCORD_CLIENT_SECRET, and BOT_OWNER_ID."
+    )
+
+
+def _discord_http_json(url: str, *, method: str = "GET", data: bytes | None = None, headers: dict | None = None):
+    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _exchange_oauth_code(code: str) -> dict | None:
+    payload = urllib.parse.urlencode({
+        "client_id": BOT_CLIENT_ID,
+        "client_secret": DISCORD_CLIENT_SECRET,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": OAUTH_REDIRECT_URI,
+    }).encode("utf-8")
+    try:
+        return _discord_http_json(
+            DISCORD_OAUTH_TOKEN_URL,
+            method="POST",
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    except Exception as e:
+        log.error("OAuth token exchange failed: %s", e)
+        return None
+
+
+def _fetch_discord_user(access_token: str) -> dict | None:
+    try:
+        return _discord_http_json(
+            DISCORD_API_USER_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    except Exception as e:
+        log.error("OAuth user fetch failed: %s", e)
+        return None
+
+
+def require_owner(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not _admin_oauth_configured():
+            return "Admin dashboard is not configured.", 503
+        owner_id = str(BOT_OWNER_ID).strip()
+        if session.get("admin_id") != owner_id:
+            return redirect(url_for("admin_login"))
+        return f(*args, **kwargs)
+    return decorated
+
+
+@flask_app.route("/admin/login")
+def admin_login():
+    if not _admin_oauth_configured():
+        return "Admin dashboard is not configured.", 503
+    state = secrets.token_urlsafe(32)
+    session["oauth_state"] = state
+    params = urllib.parse.urlencode({
+        "client_id": BOT_CLIENT_ID,
+        "redirect_uri": OAUTH_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "identify",
+        "state": state,
+    })
+    return redirect(f"{DISCORD_OAUTH_AUTHORIZE_URL}?{params}")
+
+
+@flask_app.route("/admin/callback")
+def admin_callback():
+    if not _admin_oauth_configured():
+        return "Admin dashboard is not configured.", 503
+
+    error = request.args.get("error")
+    if error:
+        log.warning("OAuth callback error: %s", error)
+        abort(403)
+
+    state = request.args.get("state", "")
+    if not state or state != session.get("oauth_state"):
+        log.warning("OAuth callback state mismatch")
+        abort(403)
+    session.pop("oauth_state", None)
+
+    code = request.args.get("code")
+    if not code:
+        abort(400)
+
+    token_data = _exchange_oauth_code(code)
+    if not token_data or not token_data.get("access_token"):
+        abort(403)
+
+    user = _fetch_discord_user(token_data["access_token"])
+    if not user or str(user.get("id", "")) != str(BOT_OWNER_ID).strip():
+        log.warning("OAuth login rejected for user id=%s", user.get("id") if user else None)
+        abort(403)
+
+    session["admin_id"] = str(user["id"])
+    session["admin_username"] = user.get("username", "")
+    return redirect(url_for("admin_metrics"))
+
+
+@flask_app.route("/admin/logout")
+def admin_logout():
+    session.clear()
+    return redirect(url_for("admin_login"))
+
+
+@flask_app.route("/admin/metrics")
+@require_owner
+def admin_metrics():
+    days = request.args.get("days", 7, type=int)
+    days = max(1, min(365, days))
+
+    summary = {}
+    if _usage_metrics_mod:
+        try:
+            summary = _usage_metrics_mod.get_summary(days)
+        except Exception as e:
+            log.error("admin_metrics get_summary failed: %s", e)
+
+    servers = len(bot.guilds) if bot and bot.is_ready() else 0
+    api_stats = get_api_usage_stats()
+
+    top_guilds = []
+    for gid, cnt, users in summary.get("top_guilds") or []:
+        name = gid
+        if bot and bot.is_ready():
+            try:
+                guild = bot.get_guild(int(gid))
+                if guild:
+                    name = guild.name
+            except (ValueError, TypeError):
+                pass
+        top_guilds.append({"name": name, "events": cnt, "users": users})
+
+    return render_template(
+        "admin.html",
+        summary=summary,
+        top_guilds=top_guilds,
+        servers=servers,
+        api_stats=api_stats,
+        days=days,
+        bot_online=bot.is_ready() if bot else False,
+        admin_username=session.get("admin_username", ""),
+    )
 
 
 @flask_app.route('/')
