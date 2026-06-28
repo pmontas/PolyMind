@@ -200,27 +200,47 @@ flask_app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
 )
 DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET")
-OAUTH_REDIRECT_URI = os.getenv(
-    "OAUTH_REDIRECT_URI",
-    "https://discorddev.azurewebsites.net/admin/callback",
-)
 DISCORD_OAUTH_AUTHORIZE_URL = "https://discord.com/api/oauth2/authorize"
 DISCORD_OAUTH_TOKEN_URL = "https://discord.com/api/oauth2/token"
 DISCORD_API_USER_URL = "https://discord.com/api/users/@me"
 
 
+def _oauth_redirect_uri() -> str:
+    """OAuth redirect URI — env override, else current request host (Azure-friendly)."""
+    explicit = (os.getenv("OAUTH_REDIRECT_URI") or "").strip()
+    if explicit:
+        return explicit
+    return request.url_root.rstrip("/") + "/admin/callback"
+
+
+def _admin_oauth_missing() -> list[str]:
+    missing = []
+    if not flask_app.secret_key:
+        missing.append("FLASK_SECRET_KEY")
+    if not DISCORD_CLIENT_SECRET:
+        missing.append("DISCORD_CLIENT_SECRET")
+    if not BOT_OWNER_ID:
+        missing.append("BOT_OWNER_ID")
+    return missing
+
+
 def _admin_oauth_configured() -> bool:
-    return bool(
-        flask_app.secret_key
-        and DISCORD_CLIENT_SECRET
-        and BOT_OWNER_ID
+    return not _admin_oauth_missing()
+
+
+def _admin_not_configured_message() -> str:
+    missing = _admin_oauth_missing()
+    if not missing:
+        return "Admin dashboard is not configured."
+    return (
+        "Admin dashboard is not configured. Missing Azure Application settings: "
+        + ", ".join(missing)
+        + ". Add them in Azure Portal → App Service → Environment variables, Save, then restart."
     )
 
 
 if not _admin_oauth_configured():
-    log.warning(
-        "Admin dashboard OAuth disabled: set FLASK_SECRET_KEY, DISCORD_CLIENT_SECRET, and BOT_OWNER_ID."
-    )
+    log.warning("Admin dashboard OAuth disabled. Missing: %s", ", ".join(_admin_oauth_missing()))
 
 
 def _discord_http_json(url: str, *, method: str = "GET", data: bytes | None = None, headers: dict | None = None):
@@ -229,13 +249,13 @@ def _discord_http_json(url: str, *, method: str = "GET", data: bytes | None = No
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _exchange_oauth_code(code: str) -> dict | None:
+def _exchange_oauth_code(code: str, redirect_uri: str) -> dict | None:
     payload = urllib.parse.urlencode({
         "client_id": BOT_CLIENT_ID,
         "client_secret": DISCORD_CLIENT_SECRET,
         "grant_type": "authorization_code",
         "code": code,
-        "redirect_uri": OAUTH_REDIRECT_URI,
+        "redirect_uri": redirect_uri,
     }).encode("utf-8")
     try:
         return _discord_http_json(
@@ -264,7 +284,7 @@ def require_owner(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if not _admin_oauth_configured():
-            return "Admin dashboard is not configured.", 503
+            return _admin_not_configured_message(), 503
         owner_id = str(BOT_OWNER_ID).strip()
         if session.get("admin_id") != owner_id:
             return redirect(url_for("admin_login"))
@@ -275,12 +295,14 @@ def require_owner(f):
 @flask_app.route("/admin/login")
 def admin_login():
     if not _admin_oauth_configured():
-        return "Admin dashboard is not configured.", 503
+        return _admin_not_configured_message(), 503
     state = secrets.token_urlsafe(32)
     session["oauth_state"] = state
+    redirect_uri = _oauth_redirect_uri()
+    session["oauth_redirect_uri"] = redirect_uri
     params = urllib.parse.urlencode({
         "client_id": BOT_CLIENT_ID,
-        "redirect_uri": OAUTH_REDIRECT_URI,
+        "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": "identify",
         "state": state,
@@ -291,7 +313,7 @@ def admin_login():
 @flask_app.route("/admin/callback")
 def admin_callback():
     if not _admin_oauth_configured():
-        return "Admin dashboard is not configured.", 503
+        return _admin_not_configured_message(), 503
 
     error = request.args.get("error")
     if error:
@@ -308,7 +330,8 @@ def admin_callback():
     if not code:
         abort(400)
 
-    token_data = _exchange_oauth_code(code)
+    redirect_uri = session.pop("oauth_redirect_uri", None) or _oauth_redirect_uri()
+    token_data = _exchange_oauth_code(code, redirect_uri)
     if not token_data or not token_data.get("access_token"):
         abort(403)
 
