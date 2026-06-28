@@ -143,14 +143,25 @@ def get_summary(days: int = 7) -> dict:
             v for k, v in by_event.items() if k.endswith("_blocked")
         )
 
-        return {
+        summary = {
             "days": days,
             "by_event": by_event,
             "top_guilds": [(gid, cnt, users_by_guild.get(gid, 0)) for gid, cnt in guild_rows],
             "unique_users": user_rows,
             "premium_blocked": premium_blocked,
             "total_events": sum(by_event.values()),
+            "task_period": {
+                "creates": by_event.get("task_create", 0),
+                "runs": by_event.get("task_run", 0),
+            },
         }
+        try:
+            import scheduled_tasks
+            summary["tasks"] = scheduled_tasks.get_task_stats()
+        except Exception as e:
+            log.debug("Task stats unavailable: %s", e)
+            summary["tasks"] = {}
+        return summary
     except Exception as e:
         log.error("get_summary failed: %s", e)
         session.rollback()
@@ -175,13 +186,25 @@ def get_guild_detail(guild_id: str, days: int = 7) -> dict:
             .filter(UsageEvent.created_at >= since, UsageEvent.guild_id == gid)
             .scalar()
         ) or 0
-        return {
+        by_event = {etype: count for etype, count in rows}
+        detail = {
             "guild_id": gid,
             "days": days,
-            "by_event": {etype: count for etype, count in rows},
+            "by_event": by_event,
             "unique_users": users,
             "total_events": sum(c for _, c in rows),
+            "task_period": {
+                "creates": by_event.get("task_create", 0),
+                "runs": by_event.get("task_run", 0),
+            },
         }
+        try:
+            import scheduled_tasks
+            detail["tasks"] = scheduled_tasks.get_guild_task_stats(gid)
+        except Exception as e:
+            log.debug("Guild task stats unavailable: %s", e)
+            detail["tasks"] = {}
+        return detail
     except Exception as e:
         log.error("get_guild_detail failed: %s", e)
         session.rollback()
@@ -208,6 +231,8 @@ def format_report(summary: dict, bot=None) -> str:
             lines.append(f"• `{etype}`: {by_event[etype]}")
     else:
         lines.append("• No events recorded.")
+
+    lines.extend(_format_task_section(summary, days, bot))
 
     top = summary.get("top_guilds") or []
     if top:
@@ -245,4 +270,59 @@ def format_guild_report(detail: dict, bot=None) -> str:
             lines.append(f"• `{etype}`: {by_event[etype]}")
     else:
         lines.append("• No events recorded.")
+    lines.extend(_format_task_section(detail, detail.get("days", 7), bot, guild_only=True))
     return "\n".join(lines)
+
+
+def _format_task_section(data: dict, days: int, bot=None, guild_only: bool = False) -> list[str]:
+    """Format scheduled task stats for Discord reports."""
+    tp = data.get("task_period") or {}
+    tasks = data.get("tasks") or {}
+    has_period = bool(tp.get("creates") or tp.get("runs"))
+    has_inventory = bool(tasks.get("total"))
+    if not has_period and not has_inventory:
+        return []
+
+    lines = ["", "**Scheduled tasks (BETA)**"]
+    if tp.get("creates") or tp.get("runs"):
+        lines.append(
+            f"• Last {days} days: **{tp.get('creates', 0)}** created · **{tp.get('runs', 0)}** runs"
+        )
+    if not tasks:
+        return lines
+
+    if guild_only:
+        if tasks.get("total"):
+            lines.append(
+                f"• This server: **{tasks.get('enabled', 0)}** active · "
+                f"**{tasks.get('paused', 0)}** paused · **{tasks.get('total', 0)}** total"
+            )
+            if tasks.get("total_runs"):
+                lines.append(f"• Lifetime runs: **{tasks['total_runs']}**")
+            by_type = tasks.get("by_type") or {}
+            if by_type:
+                lines.append("• By type: " + ", ".join(f"`{k}`: {v}" for k, v in sorted(by_type.items())))
+        return lines
+
+    if tasks.get("total"):
+        lines.append(
+            f"• Live inventory: **{tasks.get('enabled', 0)}** active · "
+            f"**{tasks.get('paused', 0)}** paused · **{tasks.get('total', 0)}** total · "
+            f"**{tasks.get('guilds_with_tasks', 0)}** server(s)"
+        )
+        if tasks.get("total_runs"):
+            lines.append(f"• Lifetime runs (all tasks): **{tasks['total_runs']}**")
+        by_type = tasks.get("by_type") or {}
+        if by_type:
+            lines.append("• By type: " + ", ".join(f"`{k}`: {v}" for k, v in sorted(by_type.items())))
+        top = tasks.get("top_guilds") or []
+        if top:
+            lines.append("• Top servers by tasks:")
+            for i, (gid, cnt) in enumerate(top, 1):
+                name = gid
+                if bot:
+                    g = bot.get_guild(int(gid))
+                    if g:
+                        name = g.name
+                lines.append(f"  {i}. **{name}** — {cnt} task(s)")
+    return lines

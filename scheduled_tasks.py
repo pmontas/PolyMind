@@ -16,7 +16,7 @@ from discord import app_commands
 import feedparser
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import Column, Integer, String, Boolean, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, func
 
 log = logging.getLogger("polymind.tasks")
 
@@ -136,6 +136,84 @@ def count_active_tasks(guild_id: str) -> int:
         .filter(ScheduledTask.guild_id == str(guild_id), ScheduledTask.enabled == True)
         .count()
     )
+
+
+def get_task_stats() -> dict:
+    """Live scheduled-task inventory for owner analytics."""
+    app = _app()
+    if not ScheduledTask:
+        return {}
+    session = app.db_session
+    try:
+        total = session.query(ScheduledTask).count()
+        enabled = session.query(ScheduledTask).filter(ScheduledTask.enabled == True).count()
+        guilds_with_tasks = (
+            session.query(func.count(func.distinct(ScheduledTask.guild_id))).scalar()
+        ) or 0
+        by_type_rows = (
+            session.query(ScheduledTask.task_type, func.count(ScheduledTask.id))
+            .group_by(ScheduledTask.task_type)
+            .all()
+        )
+        top_rows = (
+            session.query(ScheduledTask.guild_id, func.count(ScheduledTask.id))
+            .group_by(ScheduledTask.guild_id)
+            .order_by(func.count(ScheduledTask.id).desc())
+            .limit(5)
+            .all()
+        )
+        total_runs = session.query(func.coalesce(func.sum(ScheduledTask.run_count), 0)).scalar() or 0
+        return {
+            "total": total,
+            "enabled": enabled,
+            "paused": total - enabled,
+            "guilds_with_tasks": guilds_with_tasks,
+            "by_type": {t: c for t, c in by_type_rows},
+            "top_guilds": [(gid, cnt) for gid, cnt in top_rows],
+            "total_runs": int(total_runs),
+        }
+    except Exception as e:
+        log.error("get_task_stats error: %s", e)
+        session.rollback()
+        return {}
+
+
+def get_guild_task_stats(guild_id: str) -> dict:
+    """Scheduled tasks for one guild."""
+    app = _app()
+    if not ScheduledTask:
+        return {}
+    session = app.db_session
+    gid = str(guild_id)
+    try:
+        total = session.query(ScheduledTask).filter(ScheduledTask.guild_id == gid).count()
+        enabled = (
+            session.query(ScheduledTask)
+            .filter(ScheduledTask.guild_id == gid, ScheduledTask.enabled == True)
+            .count()
+        )
+        by_type_rows = (
+            session.query(ScheduledTask.task_type, func.count(ScheduledTask.id))
+            .filter(ScheduledTask.guild_id == gid)
+            .group_by(ScheduledTask.task_type)
+            .all()
+        )
+        total_runs = (
+            session.query(func.coalesce(func.sum(ScheduledTask.run_count), 0))
+            .filter(ScheduledTask.guild_id == gid)
+            .scalar()
+        ) or 0
+        return {
+            "total": total,
+            "enabled": enabled,
+            "paused": total - enabled,
+            "by_type": {t: c for t, c in by_type_rows},
+            "total_runs": int(total_runs),
+        }
+    except Exception as e:
+        log.error("get_guild_task_stats error: %s", e)
+        session.rollback()
+        return {}
 
 
 def is_task_due(task, now_utc: datetime.datetime | None = None) -> bool:

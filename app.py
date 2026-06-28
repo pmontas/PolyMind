@@ -461,6 +461,20 @@ def admin_metrics():
                 pass
         top_guilds.append({"name": name, "events": cnt, "users": users})
 
+    tasks = summary.get("tasks") or {}
+    task_period = summary.get("task_period") or {}
+    top_task_guilds = []
+    for gid, cnt in tasks.get("top_guilds") or []:
+        name = gid
+        if bot and bot.is_ready():
+            try:
+                guild = bot.get_guild(int(gid))
+                if guild:
+                    name = guild.name
+            except (ValueError, TypeError):
+                pass
+        top_task_guilds.append({"name": name, "count": cnt})
+
     return render_template(
         "admin.html",
         summary=summary,
@@ -470,6 +484,9 @@ def admin_metrics():
         days=days,
         bot_online=bot.is_ready() if bot else False,
         admin_username=session.get("admin_username", ""),
+        tasks=tasks,
+        task_period=task_period,
+        top_task_guilds=top_task_guilds,
     )
 
 
