@@ -15,6 +15,7 @@ import datetime
 import google.generativeai as genai
 from flask import Flask, render_template, jsonify, request, redirect, session, url_for, abort
 from werkzeug.middleware.proxy_fix import ProxyFix
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from threading import Thread
 import traceback
 import time
@@ -217,6 +218,36 @@ def _oauth_redirect_uri() -> str:
     return url_for("admin_callback", _external=True, _scheme="https")
 
 
+def _oauth_state_serializer() -> URLSafeTimedSerializer:
+    return URLSafeTimedSerializer(flask_app.secret_key, salt="polymind-admin-oauth")
+
+
+def _make_oauth_state(redirect_uri: str) -> str:
+    """Signed state token — survives Discord redirect without relying on session cookies."""
+    return _oauth_state_serializer().dumps({
+        "nonce": secrets.token_urlsafe(16),
+        "redirect_uri": redirect_uri,
+    })
+
+
+def _parse_oauth_state(state: str) -> dict | None:
+    try:
+        return _oauth_state_serializer().loads(state, max_age=600)
+    except (BadSignature, SignatureExpired):
+        return None
+
+
+def _oauth_error_page(title: str, message: str, status: int = 403):
+    body = (
+        f"<!DOCTYPE html><html lang='en'><head><meta charset='UTF-8'>"
+        f"<title>{title} - PolyMind Admin</title>"
+        f"<style>body{{background:#0f172a;color:#fff;font-family:sans-serif;padding:2rem;max-width:40rem;margin:auto}}</style>"
+        f"</head><body><h1>{title}</h1><p>{message}</p>"
+        f"<p><a href='/admin/metrics' style='color:#60a5fa'>Try again</a></p></body></html>"
+    )
+    return body, status
+
+
 def _admin_oauth_missing() -> list[str]:
     missing = []
     if not flask_app.secret_key:
@@ -313,11 +344,9 @@ def admin_oauth_info():
 def admin_login():
     if not _admin_oauth_configured():
         return _admin_not_configured_message(), 503
-    state = secrets.token_urlsafe(32)
-    session["oauth_state"] = state
     redirect_uri = _oauth_redirect_uri()
+    state = _make_oauth_state(redirect_uri)
     log.info("Admin OAuth login redirect_uri=%s", redirect_uri)
-    session["oauth_redirect_uri"] = redirect_uri
     params = urllib.parse.urlencode({
         "client_id": BOT_CLIENT_ID,
         "redirect_uri": redirect_uri,
@@ -336,27 +365,40 @@ def admin_callback():
     error = request.args.get("error")
     if error:
         log.warning("OAuth callback error: %s", error)
-        abort(403)
+        return _oauth_error_page("Login failed", f"Discord returned: {error}")
 
-    state = request.args.get("state", "")
-    if not state or state != session.get("oauth_state"):
-        log.warning("OAuth callback state mismatch")
-        abort(403)
-    session.pop("oauth_state", None)
+    state_param = request.args.get("state", "")
+    state_data = _parse_oauth_state(state_param) if state_param else None
+    if not state_data:
+        log.warning("OAuth callback invalid or expired state")
+        return _oauth_error_page(
+            "Session expired",
+            "OAuth state was invalid or expired. Start again from /admin/metrics.",
+        )
 
     code = request.args.get("code")
     if not code:
         abort(400)
 
-    redirect_uri = session.pop("oauth_redirect_uri", None) or _oauth_redirect_uri()
+    redirect_uri = state_data.get("redirect_uri") or _oauth_redirect_uri()
     token_data = _exchange_oauth_code(code, redirect_uri)
     if not token_data or not token_data.get("access_token"):
-        abort(403)
+        log.error("OAuth token exchange failed for redirect_uri=%s", redirect_uri)
+        return _oauth_error_page(
+            "Login failed",
+            "Could not exchange authorization code with Discord. "
+            "Check DISCORD_CLIENT_SECRET and that the redirect URI in Discord matches /admin/oauth-info.",
+        )
 
     user = _fetch_discord_user(token_data["access_token"])
-    if not user or str(user.get("id", "")) != str(BOT_OWNER_ID).strip():
-        log.warning("OAuth login rejected for user id=%s", user.get("id") if user else None)
-        abort(403)
+    owner_id = str(BOT_OWNER_ID).strip()
+    if not user or str(user.get("id", "")) != owner_id:
+        log.warning("OAuth login rejected for user id=%s (owner=%s)", user.get("id") if user else None, owner_id)
+        return _oauth_error_page(
+            "Access denied",
+            "This Discord account is not authorized. "
+            f"Log in with the account matching BOT_OWNER_ID ({owner_id}).",
+        )
 
     session["admin_id"] = str(user["id"])
     session["admin_username"] = user.get("username", "")
