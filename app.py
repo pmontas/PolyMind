@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 import datetime
 import google.generativeai as genai
 from flask import Flask, render_template, jsonify, request, redirect, session, url_for, abort
+from werkzeug.middleware.proxy_fix import ProxyFix
 from threading import Thread
 import traceback
 import time
@@ -186,6 +187,8 @@ ensure_scheduled_tasks_feature()
 
 # --- WEB SERVER (FLASK) ---
 flask_app = Flask(__name__)
+# Azure App Service sits behind a reverse proxy; trust X-Forwarded-* for HTTPS/host.
+flask_app.wsgi_app = ProxyFix(flask_app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 # OAuth2 invite URL (bot + applications.commands)
 BOT_CLIENT_ID = os.getenv("BOT_CLIENT_ID", "1472960650870259763")
@@ -206,11 +209,12 @@ DISCORD_API_USER_URL = "https://discord.com/api/users/@me"
 
 
 def _oauth_redirect_uri() -> str:
-    """OAuth redirect URI — env override, else current request host (Azure-friendly)."""
+    """OAuth redirect URI — must match Discord Developer Portal exactly."""
     explicit = (os.getenv("OAUTH_REDIRECT_URI") or "").strip()
     if explicit:
         return explicit
-    return request.url_root.rstrip("/") + "/admin/callback"
+    # Use the host the browser used (ProxyFix makes scheme/host correct on Azure).
+    return url_for("admin_callback", _external=True, _scheme="https")
 
 
 def _admin_oauth_missing() -> list[str]:
@@ -292,6 +296,19 @@ def require_owner(f):
     return decorated
 
 
+@flask_app.route("/admin/oauth-info")
+def admin_oauth_info():
+    """Shows the redirect URI this app sends to Discord — register it in Developer Portal."""
+    if not _admin_oauth_configured():
+        return jsonify({"error": _admin_not_configured_message()}), 503
+    uri = _oauth_redirect_uri()
+    return jsonify({
+        "redirect_uri": uri,
+        "client_id": BOT_CLIENT_ID,
+        "hint": "Discord Developer Portal → OAuth2 → Redirects — add redirect_uri exactly as shown.",
+    })
+
+
 @flask_app.route("/admin/login")
 def admin_login():
     if not _admin_oauth_configured():
@@ -299,6 +316,7 @@ def admin_login():
     state = secrets.token_urlsafe(32)
     session["oauth_state"] = state
     redirect_uri = _oauth_redirect_uri()
+    log.info("Admin OAuth login redirect_uri=%s", redirect_uri)
     session["oauth_redirect_uri"] = redirect_uri
     params = urllib.parse.urlencode({
         "client_id": BOT_CLIENT_ID,
